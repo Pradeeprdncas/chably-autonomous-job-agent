@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Chably AI"
+description = "A polished career intelligence web app that helps people understand their strengths, improve their profile, discover better-fit roles, and manage outreach and applications from one calm workspace."
+version = "1.0.0"
+id = "artifacts/chably-ai"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25394
+
+[services.development]
+run = "pnpm --filter @workspace/chably-ai run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/chably-ai", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/chably-ai/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25394"
+BASE_PATH = "/"

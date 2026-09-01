@@ -1,0 +1,581 @@
+The backend is runnable and approximately **95% code-complete**. The remaining work is external production setup—primarily real SearXNG verification and Render deployment—not additional backend features.
+
+## Backend status
+
+- Full regression: **16 passed**
+- Clean Python 3.11 build: **passed**
+- Compile and application import: **passed**
+- Dependency validation: **passed**
+- Production-mode server boot: **passed**
+- `/health`: **200 OK**
+- OpenAPI: **57 paths, 64 operations**
+- Total application routes: **79**
+- Gemini live API: **verified**
+- Mistral live API: **verified**
+- Google OAuth/Gmail: **verified**
+- Gmail reply synchronization: **working and idempotent**
+- SQLite: **online**
+- ChromaDB: **online**
+- Backup and temporary restore test: **passed for SQLite and Chroma**
+- Secret scan: **no committed credentials found**
+- Standalone Git repository: **initialized at the correct project root**
+- Render blueprint: **configured for Python 3.11, Starter plan, `/health`, and persistent `/var/data` disk**
+- Server-render runnable: **yes**, using the Render start command
+
+The Gmail database currently contains five incoming messages, five classified replies, and two applications marked `replied`. The latest synchronization found zero new messages because those replies were already processed.
+
+Important files:
+
+- [render.yaml](/Users/SkyneTBee/dev/chably-ai/render.yaml)
+- [FRONTEND_INTEGRATION.md](/Users/SkyneTBee/dev/chably-ai/backend/FRONTEND_INTEGRATION.md)
+- [openapi.json](/Users/SkyneTBee/dev/chably-ai/backend/openapi.json)
+- [requirements.lock](/Users/SkyneTBee/dev/chably-ai/backend/requirements.lock)
+- [restore_data.py](/Users/SkyneTBee/dev/chably-ai/backend/app/scripts/restore_data.py)
+- [.env.example](/Users/SkyneTBee/dev/chably-ai/backend/.env.example)
+
+## What remains
+
+SearXNG is implemented but **not real-world verified**, because `SEARXNG_URL` is not configured. Therefore I will not falsely mark search as verified.
+
+Manual production tasks:
+
+1. Provision a real SearXNG instance with JSON enabled.
+2. Set `SEARXNG_URL` and run the real job-search vertical slice.
+3. Create a GitHub repository, add its remote, commit and push. I did not commit automatically.
+4. Deploy the Render blueprint using a paid persistent disk.
+5. Set all production secrets in Render.
+6. Add the Render HTTPS callback to Google Cloud.
+7. Deploy the frontend, then update `FRONTEND_URL` and `CORS_ORIGINS`.
+8. Rotate previously used API credentials before public production use.
+
+Current honest status:
+
+**BACKEND FUNCTIONALLY COMPLETE — PRODUCTION FREEZE BLOCKED ONLY BY REAL SEARXNG AND DEPLOYMENT VERIFICATION**
+
+## Copy-ready Lovable prompt
+
+Attach `FRONTEND_INTEGRATION.md` and `openapi.json` to Lovable along with this prompt:
+
+```text
+Build a complete production-quality frontend for “Chably AI”, an AI-powered career intelligence platform.
+
+IMPORTANT STACK REQUIREMENTS
+
+Use:
+
+- React 18+
+- Vite
+- JavaScript, not TypeScript
+- React Router
+- Normal hand-written CSS
+- Standard npm project
+- Fetch API or a small custom API client
+- Lucide React icons if icons are needed
+
+The finished application must run with:
+
+npm install
+npm run dev
+npm run build
+npm run preview
+
+Do NOT use:
+
+- Next.js
+- Tailwind CSS
+- shadcn/ui
+- Material UI
+- Bootstrap
+- Supabase
+- Firebase
+- a new backend
+- server-side functions
+- mock API endpoints
+- hardcoded demo responses
+- TypeScript
+- inline styles throughout the application
+
+This is frontend-only. The FastAPI backend already exists and is the source of truth.
+
+BACKEND CONTRACT
+
+I am providing:
+
+1. FRONTEND_INTEGRATION.md
+2. openapi.json
+
+Read both files before implementing the API integration.
+
+Never invent endpoints, request fields, enum values, or response shapes. If these instructions and OpenAPI differ, follow openapi.json.
+
+Use:
+
+VITE_API_BASE_URL=http://localhost:8000
+
+Create:
+
+.env.example
+
+containing:
+
+VITE_API_BASE_URL=http://localhost:8000
+
+All backend responses use this envelope:
+
+{
+  "success": true,
+  "message": "...",
+  "data": {},
+  "meta": {},
+  "errors": [],
+  "events": []
+}
+
+Create a reusable API client that:
+
+- prepends VITE_API_BASE_URL
+- adds Authorization: Bearer <access_token>
+- supports JSON and multipart PDF requests
+- extracts the response envelope consistently
+- shows backend error messages cleanly
+- handles 401 by attempting exactly one token refresh
+- immediately replaces both tokens after refresh-token rotation
+- redirects to login when refresh fails
+- handles 404, 409, 422 and 429 appropriately
+- never automatically retries email-send or other non-idempotent requests
+- never exposes secrets in logs
+
+AUTHENTICATION
+
+Implement:
+
+- Register
+- Login
+- Restore authenticated session
+- Refresh-token rotation
+- Logout
+- Protected routes
+- Account deletion
+- Account data export
+
+Use these endpoints according to OpenAPI:
+
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+POST /api/v1/auth/refresh
+POST /api/v1/auth/logout
+GET /api/v1/auth/me
+GET /api/v1/account/export
+DELETE /api/v1/account
+
+Keep the access token in application memory when possible. Use a clearly isolated session-storage strategy for restoring the session. Never include backend provider keys or Google secrets in frontend code.
+
+PRODUCT EXPERIENCE
+
+Build these pages and flows:
+
+1. Public landing page
+2. Register
+3. Login
+4. Authenticated application shell
+5. Dashboard
+6. Resume upload and processing
+7. Candidate profile
+8. Profile completeness
+9. Adaptive AI interview
+10. Role recommendations
+11. Resume analysis
+12. Resume rewrite
+13. Job search
+14. Search progress
+15. Search results
+16. Opportunity details
+17. Saved jobs
+18. Company details
+19. Gmail connection
+20. Outreach drafts
+21. Outreach approval and sending
+22. Gmail thread and reply review
+23. Application tracker
+24. Settings
+25. Account export and deletion
+
+The primary product journey is:
+
+register/login
+→ upload PDF resume
+→ review extracted profile
+→ complete AI interview
+→ improve profile completeness
+→ review role recommendations
+→ search for jobs
+→ review ranked opportunities
+→ save or classify jobs
+→ connect Gmail
+→ discover contacts
+→ generate an outreach draft
+→ explicitly approve the draft
+→ send through Gmail
+→ synchronize replies
+→ review reply classification and drafts
+→ track application progress
+
+DESIGN DIRECTION
+
+Create a polished, modern career SaaS product—not a generic admin template.
+
+Visual direction:
+
+- Calm, intelligent and professional
+- Light background with subtle cool-gray surfaces
+- Deep navy or charcoal text
+- Indigo/blue primary accent
+- Green only for success and strong-fit states
+- Amber for warnings and pending approval
+- Red only for destructive actions and errors
+- Generous whitespace
+- Soft borders and restrained shadows
+- Rounded corners without making everything pill-shaped
+- Clear information hierarchy
+- Readable typography
+- Responsive from mobile through desktop
+
+Use CSS variables for:
+
+- colors
+- spacing
+- typography
+- radii
+- shadows
+- transitions
+- breakpoints where practical
+
+Create organized CSS files, for example:
+
+src/styles/reset.css
+src/styles/tokens.css
+src/styles/global.css
+src/styles/layout.css
+src/styles/components.css
+src/styles/pages.css
+src/styles/responsive.css
+
+Do not place the entire design in one enormous CSS file.
+
+APPLICATION LAYOUT
+
+Desktop:
+
+- Left sidebar navigation
+- Top header with page title, status and user menu
+- Main content area
+- Optional right-side contextual panels where useful
+
+Mobile:
+
+- Compact header
+- Drawer or bottom navigation
+- Touch-friendly controls
+- Tables converted into cards or horizontally scrollable layouts
+- No clipped content
+
+Navigation sections:
+
+Overview
+- Dashboard
+
+Career Intelligence
+- Resume
+- Profile
+- AI Interview
+- Role Matches
+
+Opportunities
+- Job Search
+- Saved Jobs
+- Applications
+
+Outreach
+- Gmail Integration
+- Outreach
+- Replies
+
+Account
+- Settings
+- Account
+
+DASHBOARD
+
+Use GET /api/v1/dashboard.
+
+Show:
+
+- welcome message
+- profile completeness
+- resume status
+- current interview state
+- top role recommendations
+- recent opportunities
+- application counts by status
+- Gmail connection state
+- pending outreach/reply approvals
+- useful next action
+
+The dashboard must gracefully handle incomplete onboarding.
+
+RESUME
+
+Use multipart field “file” and accept PDF files only.
+
+Show:
+
+- drag-and-drop area
+- selected filename and size
+- upload progress state
+- backend processing state
+- success/error response
+- extracted profile summary
+- clear next step
+
+Do not fake upload progress if browser upload progress is unavailable; use clear indeterminate processing states.
+
+PROFILE AND INTERVIEW
+
+Create editable profile sections matching the backend schema.
+
+Show profile completeness:
+
+- overall percentage
+- category-level completion
+- missing fields
+- recommended next action
+
+The adaptive interview must feel conversational:
+
+- one question at a time
+- answer composer
+- progress/completeness indication
+- interview history
+- loading state while generating the next question
+- accessible keyboard submission
+- no invented chat responses
+
+Use the authenticated user ID for legacy endpoints that contain {user_id}. Never allow another user ID to be entered or changed in the UI.
+
+JOB SEARCH
+
+Provide a natural-language search box with examples such as:
+
+“Backend and applied AI roles in Bangalore for 0–3 years experience”
+
+Use:
+
+POST /api/v1/job-search
+GET /api/v1/job-search/{search_id}
+GET /api/v1/job-search/{search_id}/progress
+
+Poll progress responsibly while a search is active, then stop polling on completion or failure.
+
+Show real progress fields returned by the backend, including queries, companies, jobs, opportunities and errors where available.
+
+Search result cards should display only fields returned by the API:
+
+- role title
+- company
+- location
+- remote type
+- experience
+- skills
+- final fit score
+- fit level
+- matched skills
+- missing skills
+- recommendation
+- source
+- external job URL
+
+Never display fabricated jobs when the backend search provider is unavailable. Show a helpful service-unavailable message instead.
+
+OPPORTUNITIES AND APPLICATIONS
+
+Implement filters and pagination using only parameters documented in OpenAPI.
+
+Opportunity details should include:
+
+- job information
+- company information
+- fit analysis
+- matched and missing skills
+- recommendation
+- save/status actions
+- contact discovery
+- outreach entry point
+
+Application tracker may use grouped columns or a clean status list, but every status change must be persisted through the backend.
+
+GMAIL AND OUTREACH
+
+Chably login and Google authorization are separate.
+
+Google connection flow:
+
+POST /api/v1/integrations/google/connect
+→ open data.authorization_url in a popup or new tab
+→ backend handles Google callback
+→ poll GET /api/v1/integrations/google/status
+→ update the UI when connected
+
+The backend callback may display its own success response. Do not attempt to exchange Google authorization codes in the frontend.
+
+Show:
+
+- connected email
+- scopes/capabilities
+- active or reauthorization-required state
+- reconnect action
+- disconnect confirmation
+- synchronization action
+- last synchronization result
+
+Outreach must remain approval-first.
+
+Never send immediately after generating a draft.
+
+Required sequence:
+
+discover contacts
+→ select a contact
+→ generate draft
+→ show editable draft review
+→ approve
+→ separately confirm send
+→ send
+→ show stored Gmail thread
+
+For send actions:
+
+- use a confirmation dialog
+- disable the button while sending
+- prevent double submission
+- do not automatically retry
+- show the backend result clearly
+
+AUTO REPLY
+
+Automatic replies must be shown as disabled by default.
+
+Do not silently enable them. Any auto-reply settings must use the backend settings endpoints and require clear user confirmation.
+
+STATES AND ACCESSIBILITY
+
+Every data-driven screen needs:
+
+- initial loading state
+- refreshing state where appropriate
+- empty state
+- recoverable error state
+- permission/session-expired state
+- success feedback
+- skeletons where useful
+
+Accessibility requirements:
+
+- semantic HTML
+- keyboard navigation
+- visible focus indicators
+- properly associated labels
+- ARIA only where semantic HTML is insufficient
+- accessible modals
+- Escape closes dialogs
+- sufficient contrast
+- reduced-motion support
+- descriptive button text
+- form errors connected to fields
+
+COMPONENT STRUCTURE
+
+Use reusable components such as:
+
+AppShell
+Sidebar
+Topbar
+ProtectedRoute
+PageHeader
+Card
+StatusBadge
+ProgressBar
+EmptyState
+ErrorState
+LoadingSkeleton
+ConfirmDialog
+ToastProvider
+Pagination
+FilterBar
+ScoreRing
+SkillTag
+OpportunityCard
+ApplicationStatus
+GoogleConnectionCard
+OutreachComposer
+ReplyThread
+ProfileSection
+InterviewMessage
+
+Organize the application into:
+
+src/api
+src/auth
+src/components
+src/context
+src/hooks
+src/layouts
+src/pages
+src/routes
+src/styles
+src/utils
+
+QUALITY REQUIREMENTS
+
+- No fake backend
+- No placeholder TODO screens
+- No lorem ipsum
+- No hardcoded user
+- No hardcoded API base URL
+- No secrets
+- No inaccessible clickable divs
+- No giant monolithic App.jsx
+- No duplicated API calls across pages
+- No invented API fields
+- No automatic email sends
+- No frontend business logic that contradicts the backend
+- No unrelated features such as payments, calendar, WhatsApp, SMS, LinkedIn automation or job auto-apply
+
+DELIVERABLE
+
+Generate the complete runnable Vite project.
+
+Include:
+
+- package.json
+- index.html
+- all React source files
+- normal CSS files
+- .env.example
+- README.md with setup instructions
+- npm scripts for dev, build and preview
+
+Before finishing:
+
+1. Run npm install.
+2. Run npm run build.
+3. Fix all build errors.
+4. Verify every page is reachable.
+5. Verify protected-route behavior.
+6. Verify the API base URL comes only from VITE_API_BASE_URL.
+7. Confirm no backend or Supabase project was created.
+8. Confirm no Tailwind dependency or configuration exists.
+
+Return the complete source code, not merely a design description.
+```
+
+::git-create-branch{cwd="/Users/SkyneTBee/dev/chably-ai" branch="main"}
