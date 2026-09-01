@@ -69,6 +69,7 @@ export const endpoints = {
   searchProgress: (id) => api(`/api/v1/job-search/${encodeURIComponent(id)}/progress`),
   searchResults: (id) => api(`/api/v1/job-search/${encodeURIComponent(id)}`),
   opportunities: () => api('/api/v1/opportunities?limit=50&offset=0'),
+  draftOutreach: (opportunityId, userId, recipientEmail = '') => api(`/api/v1/opportunities/${encodeURIComponent(opportunityId)}/draft-email?user_id=${encodeURIComponent(userId)}${recipientEmail ? `&recipient_email=${encodeURIComponent(recipientEmail)}` : ''}`, { method: 'POST' }),
   savedJobs: () => api('/api/v1/saved-jobs?limit=50&offset=0'),
   applications: () => api('/api/v1/applications?limit=50&offset=0'),
   updateApplication: (id, userId, body) => api(`/api/v1/applications/${encodeURIComponent(id)}?user_id=${encodeURIComponent(userId)}`, { method: 'PATCH', body: JSON.stringify(body) }),

@@ -9,11 +9,12 @@ from ..database import get_db
 from ..models import (AIUsage, Application, ApplicationEvent, Artifact, AuthSession,
                       CandidateProfile, GmailMessage, GmailSyncLock,
                       GoogleConnection, InterviewTurn, JobSearchSession,
-                      OAuthState, GoogleLoginExchange, Opportunity, Outreach, OutreachSettings,
+                      OAuthState, GoogleLoginExchange, Opportunity, Outreach, OutreachSettings, Company, Job,
                       ReplyAnalysis, ReplyDraft, Resume, SavedJob, User)
 from ..schemas.core import OutreachSettingsBody
 from ..services.embedding_service import EmbeddingService
-from .outreach import application_payload
+from ..services.job_discovery import company_payload, job_payload
+from .outreach import application_payload, outreach_payload
 from .utils import normalize_profile, ok
 
 router = APIRouter(tags=["account"])
@@ -34,7 +35,7 @@ def applications(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge
     query = db.query(Application).filter(Application.user_id == user.id)
     if status: query = query.filter(Application.status == status)
     rows = query.order_by(Application.last_activity_at.desc()).offset(offset).limit(limit).all()
-    return ok("Applications loaded", {"applications": [application_payload(row) for row in rows]})
+    return ok("Applications loaded", {"applications": [application_payload(row, db) for row in rows]})
 
 
 @router.get("/api/v1/search-history")
@@ -56,7 +57,7 @@ def outreach_list(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, g
     query = db.query(Outreach).filter(Outreach.user_id == user.id)
     if status: query = query.filter(Outreach.status == status)
     rows = query.order_by(Outreach.created_at.desc()).offset(offset).limit(limit).all()
-    return ok("Outreach loaded", {"outreach": [{"id": row.id, "opportunity_id": row.opportunity_id, "status": row.status, "subject": row.subject, "created_at": row.created_at.isoformat()} for row in rows]})
+    return ok("Outreach loaded", {"outreach": [outreach_payload(row) for row in rows]})
 
 
 @router.get("/api/v1/opportunities")
@@ -64,7 +65,7 @@ def opportunity_list(limit: int = Query(50, ge=1, le=100), offset: int = Query(0
     query = db.query(Opportunity).filter(Opportunity.user_id == user.id, Opportunity.final_fit_score >= minimum_fit)
     if status: query = query.filter(Opportunity.status == status)
     rows = query.order_by(Opportunity.final_fit_score.desc()).offset(offset).limit(limit).all()
-    return ok("Opportunities loaded", {"opportunities": [{"id": row.id, "job_id": row.job_id, "company_id": row.company_id, "status": row.status, "fit_score": row.final_fit_score, "analysis": row.analysis} for row in rows]})
+    return ok("Opportunities loaded", {"opportunities": [{"id": row.id, "job_id": row.job_id, "company_id": row.company_id, "status": row.status, "fit_score": row.final_fit_score, "analysis": row.analysis, "job": job_payload(db.get(Job, row.job_id)), "company": company_payload(db.get(Company, row.company_id))} for row in rows]})
 
 
 @router.get("/api/v1/settings")

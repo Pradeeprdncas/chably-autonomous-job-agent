@@ -90,12 +90,18 @@ def discover_contacts(opportunity_id: str, user_id: str = Query(...), db: Sessio
     db.commit(); return ok("Public contacts loaded", {"contacts": [contact_payload(contact) for contact in contacts]}, events=[{"type":"CONTACT_DISCOVERED","label":"Public contact discovered"}] if emails else [])
 
 @router.post("/api/v1/opportunities/{opportunity_id}/draft-email")
-async def draft_email(opportunity_id: str, user_id: str = Query(...), contact_id: str = Query(None), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def draft_email(opportunity_id: str, user_id: str = Query(...), contact_id: str = Query(None), recipient_email: str = Query(None), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_user(user_id, current_user)
     opportunity = db.get(Opportunity, opportunity_id); profile = db.get(CandidateProfile, user_id)
     if not opportunity or not profile: fail(404, "OPPORTUNITY_OR_PROFILE_NOT_FOUND", "Opportunity or candidate profile not found.")
     require_owner(opportunity, user_id, "OPPORTUNITY_NOT_FOUND")
     job = db.get(Job, opportunity.job_id); company = db.get(Company, opportunity.company_id); contact = db.get(Contact, contact_id) if contact_id else db.query(Contact).filter(Contact.company_id == company.id).order_by(Contact.confidence.desc()).first()
+    if recipient_email:
+        recipient_email = recipient_email.strip().lower()
+        if not EMAIL.fullmatch(recipient_email): fail(400, "INVALID_RECIPIENT_EMAIL", "Enter a valid recipient email address.", "recipient_email")
+        contact = db.query(Contact).filter(Contact.company_id == company.id, Contact.email == recipient_email).first()
+        if not contact:
+            contact = Contact(id=str(uuid.uuid4()), company_id=company.id, email=recipient_email, source_url="", source_type="user_provided", confidence=1.0, verification_status="user_provided"); db.add(contact); db.flush()
     if not contact or contact.company_id != company.id: fail(404, "CONTACT_NOT_FOUND", "No public contact is available for this opportunity.")
     existing = db.query(Outreach).filter(Outreach.user_id == user_id, Outreach.opportunity_id == opportunity.id, Outreach.contact_id == contact.id).first()
     if existing: return ok("Existing outreach draft loaded", {"outreach": outreach_payload(existing), "contact": contact_payload(contact)})
@@ -175,7 +181,13 @@ async def sync_google(user_id: str, db: Session = Depends(get_db), current_user:
     except RuntimeError as exc: fail(409 if str(exc) == "SYNC_ALREADY_RUNNING" else 401, str(exc), "Gmail synchronization could not start.")
     return ok("Gmail replies synchronized", result)
 
-def application_payload(application): return {"id": application.id, "opportunity_id": application.opportunity_id, "status": application.status, "source": application.source, "applied_at": application.applied_at.isoformat() if application.applied_at else None, "notes": application.notes}
+def application_payload(application, db: Session | None = None):
+    payload = {"id": application.id, "opportunity_id": application.opportunity_id, "status": application.status, "source": application.source, "applied_at": application.applied_at.isoformat() if application.applied_at else None, "notes": application.notes}
+    if db:
+        job, company = db.get(Job, application.job_id), db.get(Company, application.company_id)
+        payload["job"] = {"id": job.id, "title": job.title, "location": job.location, "job_url": job.job_url} if job else None
+        payload["company"] = {"id": company.id, "name": company.name} if company else None
+    return payload
 
 @router.post("/api/v1/opportunities/{opportunity_id}/application")
 def create_application(opportunity_id: str, body: ApplicationBody, user_id: str = Query(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
