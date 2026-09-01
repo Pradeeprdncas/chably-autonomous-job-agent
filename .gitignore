@@ -1,0 +1,17 @@
+.DS_Store
+.env
+backend/ENV.EXAMPLE.txt
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.sqlite
+*.db
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm
+backend/data/
+backend/backups/
+node_modules/
+dist/

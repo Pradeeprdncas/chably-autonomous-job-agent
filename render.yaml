@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: chably-ai-backend
+    runtime: python
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.lock
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: APP_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+      - key: DATABASE_URL
+        value: sqlite:////var/data/chably.db
+      - key: CHROMA_PATH
+        value: /var/data/chroma
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: SEARXNG_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+    disk:
+      name: chably-data
+      mountPath: /var/data
+      sizeGB: 1
