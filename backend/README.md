@@ -82,6 +82,8 @@ Every versioned response uses the same `{success, message, data, meta, errors, e
 
 Phase 2 uses a configured SearXNG instance and never falls back to mock results unless `SEARCH_MOCK_MODE=true`. Greenhouse, Lever, and Ashby public job boards have structured adapters. Static HTML is preferred; optional Playwright rendering is isolated behind `BROWSER_FETCH_ENABLED=true` and limited by the browser settings in `.env.example`.
 
+When `SEARCH_PROVIDER=searxng` but `SEARXNG_URL` is empty, Chably uses a keyless DuckDuckGo HTML search fallback rather than failing the user's search. It returns public job and careers results; configure SearXNG for a controlled production search source.
+
 Outreach uses per-user Google OAuth, not a shared Gmail account. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, and a Fernet-compatible `TOKEN_ENCRYPTION_KEY`. For local development, the redirect URI is exactly `http://localhost:8000/api/v1/integrations/google/callback`; add that exact value to the Google OAuth client's Authorized redirect URIs. A deployed environment must use its public HTTPS backend origin with the same callback path and an exact matching Google Console entry. Keep the scopes limited to `gmail.send` and `gmail.readonly`, and leave `GOOGLE_OAUTH_MOCK_MODE=false` for real verification. The default is approval-first: a user must approve an outreach draft before Gmail sends it.
 
 Passwordless Google sign-in is a separate identity-only flow. Add `GOOGLE_LOGIN_REDIRECT_URI` (locally, `http://localhost:8000/api/v1/auth/google/callback`) as a second Authorized redirect URI and environment variable. It only requests `openid email profile`; it does not grant Gmail access.

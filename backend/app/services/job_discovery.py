@@ -5,7 +5,7 @@ import re
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 from sqlalchemy.orm import Session
@@ -63,6 +63,34 @@ class SearXNGProvider(SearchProvider):
             return [{"title": str(item.get("title") or ""), "url": str(item.get("url") or ""), "snippet": str(item.get("content") or ""), "engine": ",".join(item.get("engines") or []), "source": "searxng"} for item in rows[:limit] if isinstance(item, dict) and item.get("url")]
 
 
+class DuckDuckGoProvider(SearchProvider):
+    """Keyless public-web fallback used only when a SearXNG instance is not configured."""
+
+    async def search(self, query: str, limit: int = 10) -> list[dict]:
+        from bs4 import BeautifulSoup
+
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; ChablyCareerSearch/1.0)"}
+        try:
+            async with httpx.AsyncClient(timeout=settings.http_timeout_seconds, follow_redirects=True, headers=headers) as client:
+                response = await client.get("https://html.duckduckgo.com/html/", params={"q": query})
+                response.raise_for_status()
+        except httpx.HTTPError:
+            return []
+        soup = BeautifulSoup(response.text, "html.parser")
+        rows = []
+        for link in soup.select("a.result__a")[:limit]:
+            url = link.get("href") or ""
+            parsed = urlparse(url)
+            if "duckduckgo.com" in parsed.netloc:
+                url = unquote((parse_qs(parsed.query).get("uddg") or [""])[0]) or url
+            if not url:
+                continue
+            container = link.find_parent(class_="result")
+            snippet = container.select_one(".result__snippet").get_text(" ", strip=True) if container and container.select_one(".result__snippet") else ""
+            rows.append({"title": link.get_text(" ", strip=True), "url": url, "snippet": snippet, "engine": "duckduckgo", "source": "duckduckgo"})
+        return rows
+
+
 class MockSearchProvider(SearchProvider):
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         terms = set(re.findall(r"[a-z]{3,}", query.lower()))
@@ -75,7 +103,7 @@ def get_search_provider() -> SearchProvider:
     if settings.search_mock_mode:
         return MockSearchProvider()
     if settings.search_provider.lower() == "searxng":
-        return SearXNGProvider()
+        return SearXNGProvider() if settings.searxng_url else DuckDuckGoProvider()
     raise RuntimeError("SEARCH_PROVIDER_UNAVAILABLE")
 
 
@@ -159,7 +187,9 @@ def hard_filter(job: dict, intent: dict) -> bool:
     if maximum is not None and job.get("experience_min") is not None and job["experience_min"] > maximum:
         return False
     locations = [x.lower() for x in intent.get("locations") or []]
-    if locations and not intent.get("remote") and (job.get("location") or "").lower() not in locations:
+    # Search-result snippets often omit the location. Exclude only a confirmed
+    # mismatch; retain unknown locations for transparent user review.
+    if locations and not intent.get("remote") and job.get("location") and job["location"].lower() not in locations:
         return False
     return True
 
@@ -206,14 +236,14 @@ async def evaluate_fit(user_id: str, profile: dict, job: dict, company: dict, in
     evidence = []
     try:
         evidence = EmbeddingService().find_candidate_evidence(user_id, " ".join(job.get("skills") or []) or job.get("title", ""))
-    except RuntimeError:
+    except Exception:
         evidence = []
     evaluation = await GeminiProvider()._json(
         "Evaluate candidate-to-job fit. Return fit_score 0-100, why_fit, matched_skills, missing_skills, experience_alignment, candidate_advantages, concerns, recommended_resume_version, apply_recommendation. Do not invent evidence.",
         {"candidate": profile, "candidate_evidence": evidence, "job": job, "company": company, "deterministic_match": match, "search_intent": intent},
     )
     if not evaluation:
-        raise RuntimeError("AI_PROVIDER_UNAVAILABLE")
+        return match
     proposed = int(evaluation.get("fit_score", match["deterministic_fit_score"]))
     ai_score = max(match["deterministic_fit_score"] - 15, min(match["deterministic_fit_score"] + 15, proposed))
     final = round(match["deterministic_fit_score"] * .65 + ai_score * .35)
@@ -245,8 +275,8 @@ async def execute_search(db: Session, user_id: str, query: str, search_type: str
             "Parse the job/company search request into roles, skills, locations, remote, experience_max_years, company_types, domains, search_terms. Return only those keys and preserve unknowns as empty/null.",
             {"query": query, "candidate_profile": profile.data},
         )
-        if not intent:
-            raise RuntimeError("AI_PROVIDER_UNAVAILABLE")
+        # A real provider is preferred, but a temporary AI failure must not make
+        # a user's job search unavailable; deterministic parsing remains useful.
     intent = intent or parse_intent_locally(query, profile.data)
     queries = generate_queries(intent)
     session = JobSearchSession(id=str(uuid.uuid4()), user_id=user_id, search_type=search_type, raw_query=query, structured_intent=intent, search_queries=queries, status="searching", progress={"queries_generated": len(queries), "queries_completed": 0, "companies_discovered": 0, "companies_processed": 0, "jobs_discovered": 0, "jobs_evaluated": 0, "opportunities_created": 0, "failures": 0, "processing_errors": []})

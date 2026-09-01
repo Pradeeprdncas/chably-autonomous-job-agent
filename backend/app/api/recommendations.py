@@ -36,11 +36,13 @@ async def get_recommendations(user_id: str, db: Session = Depends(get_db), curre
     embedding_service = EmbeddingService()
     try:
         candidate_roles = embedding_service.find_similar_roles(profile.data, ROLES)
-    except RuntimeError:
-        fail(503, "VECTOR_STORE_UNAVAILABLE", "Semantic role matching is temporarily unavailable.")
+    except Exception:
+        # Keep recommendations available when the optional local vector index is
+        # rebuilding or unavailable; Gemini also receives the full profile.
+        candidate_roles = ROLES[:10]
 
     recommendations = await ai.recommend_roles(profile.data, candidate_roles)
-    normalized = [normalize_role(role) for role in recommendations]
+    normalized = [normalize_role(role) for role in recommendations if isinstance(role, dict)]
 
     artifact = Artifact(
         id=str(uuid.uuid4()),

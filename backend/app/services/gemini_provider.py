@@ -95,7 +95,11 @@ class GeminiProvider(AIProvider):
 
     async def recommend_roles(self, profile, roles):
         result = await self._json(RECOMMEND_ROLES + "\nReturn 3-7 objects with title,fit_score 0-100,why_it_fits,evidence,gaps,recommendation.", {"profile":profile,"roles":roles})
-        return result or [
+        if isinstance(result, dict):
+            result = result.get("roles") or result.get("recommendations") or result.get("items")
+        if isinstance(result, list) and all(isinstance(role, dict) for role in result):
+            return result
+        return [
             {
                 "title": r["role"],
                 "fit_score": max(45, 86 - (i * 7)) if settings.ai_mock_mode else 55,
