@@ -36,6 +36,21 @@ class OAuthState(Base):
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class GoogleLoginState(Base):
+    __tablename__ = "google_login_states"
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class GoogleLoginExchange(Base):
+    __tablename__ = "google_login_exchanges"
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class AIUsage(Base):
     __tablename__ = "ai_usage"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

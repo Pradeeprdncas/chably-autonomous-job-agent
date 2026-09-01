@@ -50,6 +50,8 @@ export async function api(path, options = {}, retry = true) {
 export const endpoints = {
   register: (body) => api('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(body) }),
   login: (body) => api('/api/v1/auth/login', { method: 'POST', body: JSON.stringify(body) }),
+  googleLogin: () => api('/api/v1/auth/google/login'),
+  googleExchange: (code) => api('/api/v1/auth/google/exchange', { method: 'POST', body: JSON.stringify({ code }) }),
   logout: () => api('/api/v1/auth/logout', { method: 'POST', body: JSON.stringify({ refresh_token: session.refreshToken }) }),
   me: () => api('/api/v1/auth/me'),
   dashboard: () => api('/api/v1/dashboard'),

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = ""
+    google_login_redirect_uri: str = ""
+    google_login_oauth_scopes: str = "openid email profile"
     google_oauth_scopes: str = "https://www.googleapis.com/auth/gmail.send,https://www.googleapis.com/auth/gmail.readonly"
     google_oauth_mock_mode: bool = False
     token_encryption_key: str = ""

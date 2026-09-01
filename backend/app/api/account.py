@@ -9,7 +9,7 @@ from ..database import get_db
 from ..models import (AIUsage, Application, ApplicationEvent, Artifact, AuthSession,
                       CandidateProfile, GmailMessage, GmailSyncLock,
                       GoogleConnection, InterviewTurn, JobSearchSession,
-                      OAuthState, Opportunity, Outreach, OutreachSettings,
+                      OAuthState, GoogleLoginExchange, Opportunity, Outreach, OutreachSettings,
                       ReplyAnalysis, ReplyDraft, Resume, SavedJob, User)
 from ..schemas.core import OutreachSettingsBody
 from ..services.embedding_service import EmbeddingService
@@ -114,7 +114,7 @@ def delete_account(db: Session = Depends(get_db), user: User = Depends(get_curre
     for model in (Artifact, InterviewTurn): db.query(model).filter(model.user_id == user_id).delete(synchronize_session=False)
     db.query(CandidateProfile).filter(CandidateProfile.user_id == user_id).delete(synchronize_session=False)
     db.query(Resume).filter(Resume.user_id == user_id).delete(synchronize_session=False)
-    for model in (GoogleConnection, OutreachSettings, GmailSyncLock, OAuthState, AuthSession): db.query(model).filter(model.user_id == user_id).delete(synchronize_session=False)
+    for model in (GoogleConnection, OutreachSettings, GmailSyncLock, OAuthState, GoogleLoginExchange, AuthSession): db.query(model).filter(model.user_id == user_id).delete(synchronize_session=False)
     db.query(AIUsage).filter(AIUsage.user_id == user_id).delete(synchronize_session=False)
     db.delete(user); db.commit(); EmbeddingService().delete_user(user_id)
     return ok("Account deleted", {"deleted": True})
