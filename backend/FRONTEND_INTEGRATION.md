@@ -1,6 +1,6 @@
 # Chably frontend integration contract — API v1
 
-`/api/v1` is the frontend integration candidate and must not change casually. Final production freeze is pending a real SearXNG vertical-slice check; after that check passes, breaking changes belong in `/api/v2`. Configure the React client with `VITE_API_BASE_URL`; never put Gemini, Mistral, Google client secrets, JWT secrets, or Gmail tokens in the frontend.
+`/api/v1` is the stable frontend integration contract and must not change casually. Breaking changes belong in `/api/v2`. Configure the React client with `VITE_API_BASE_URL`; never put Gemini, Mistral, Google client secrets, JWT secrets, or Gmail tokens in the frontend.
 
 All API responses use:
 
@@ -70,6 +70,6 @@ opportunity contacts → draft email → approve → Gmail send
 
 ## Operations and errors
 
-Use `GET /health` only for process liveness and `GET /api/v1/system/status` for dependency readiness. A temporary Gemini or SearXNG outage does not make `/health` fail. Handle `401` by attempting one refresh, `404` as missing/not-owned, `409` for conflicts, and `429` with backoff. Do not retry non-idempotent sends automatically.
+Use `GET /health` only for process liveness and `GET /api/v1/system/status` or `/api/v1/system/diagnostics` for dependency readiness. A temporary AI or search-provider outage does not make `/health` fail. Handle `401` by attempting one refresh, `404` as missing/not-owned, `409` for conflicts, and `429` with backoff. Do not retry non-idempotent sends automatically.
 
-Local mock development requires explicit `AI_MOCK_MODE=true`, `SEARCH_MOCK_MODE=true`, and optionally `GOOGLE_OAUTH_MOCK_MODE=true`. Production startup rejects mock modes. SearXNG is an external service configured with `SEARXNG_URL`.
+Local mock development requires explicit `AI_MOCK_MODE=true`, `SEARCH_MOCK_MODE=true`, and optionally `GOOGLE_OAUTH_MOCK_MODE=true`. Production startup rejects mock modes. Real search defaults to the `serper,tavily,ddg,searxng` failover chain: DDG needs no configuration; Serper and Tavily use optional API keys; SearXNG uses the optional `SEARXNG_URL`.

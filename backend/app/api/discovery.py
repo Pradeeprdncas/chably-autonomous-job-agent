@@ -27,7 +27,7 @@ def result_payload(db: Session, session: JobSearchSession):
 async def job_search(body: DiscoveryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_user(body.user_id, current_user)
     try:
-        session = await execute_search(db, body.user_id, body.query, "jobs")
+        session = await execute_search(db, body.user_id, body.query, "jobs", body.freshness)
     except LookupError:
         fail(404, "PROFILE_NOT_FOUND", "Candidate profile not found.", "user_id")
     except RuntimeError as exc:
@@ -53,7 +53,7 @@ def get_progress(search_id: str, db: Session = Depends(get_db), current_user: Us
 async def company_search(body: DiscoveryRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_user(body.user_id, current_user)
     try:
-        session = await execute_search(db, body.user_id, body.query, "companies")
+        session = await execute_search(db, body.user_id, body.query, "companies", body.freshness)
     except LookupError:
         fail(404, "PROFILE_NOT_FOUND", "Candidate profile not found.", "user_id")
     except RuntimeError as exc:

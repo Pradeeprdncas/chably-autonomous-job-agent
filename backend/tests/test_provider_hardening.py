@@ -12,6 +12,7 @@ from app.config import settings
 from app.services.google_gmail import (decrypt_token, encrypt_token,
                                        validate_message)
 from app.services.job_discovery import SearXNGProvider, get_search_provider
+from app.services.search_providers import FailoverSearchProvider
 from app.services.reply_sync import (automated_type, deterministic_classification,
                                      normalize_classification,
                                      normalize_draft_body, reply_text)
@@ -25,27 +26,43 @@ class ProviderHardeningTest(unittest.IsolatedAsyncioTestCase):
         self.original_url = settings.searxng_url
         self.original_mock = settings.search_mock_mode
         self.original_provider = settings.search_provider
+        self.original_order = settings.search_provider_order
         settings.searxng_url = "https://search.internal.test"
         settings.search_mock_mode = False
         settings.search_provider = "searxng"
+        settings.search_provider_order = "searxng"
 
     async def asyncTearDown(self):
         settings.searxng_url = self.original_url
         settings.search_mock_mode = self.original_mock
         settings.search_provider = self.original_provider
+        settings.search_provider_order = self.original_order
 
     async def test_searxng_normalization_and_health(self):
         response = httpx.Response(200, request=httpx.Request("GET", "https://search.internal.test/search"), json={"results": [{"title": " Backend role ", "url": "https://example.com/jobs/1", "content": "Python", "engines": ["bing"]}, {"title": "missing url"}]})
         with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=response)):
             provider = SearXNGProvider()
             rows = await provider.search("backend careers")
-            self.assertEqual(rows, [{"title": " Backend role ", "url": "https://example.com/jobs/1", "snippet": "Python", "engine": "bing", "source": "searxng"}])
+            self.assertEqual(rows, [{"title": "Backend role", "url": "https://example.com/jobs/1", "snippet": "Python", "published_at": None, "engine": "bing", "source": "searxng"}])
             self.assertTrue(await provider.health_check())
 
     async def test_searxng_failure_has_no_mock_fallback(self):
         with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=httpx.ConnectError("offline"))):
-            with self.assertRaises(RuntimeError):
-                await get_search_provider().search("backend careers")
+            provider = get_search_provider()
+            self.assertEqual(await provider.search("backend careers"), [])
+            self.assertEqual(provider.last_attempts[0]["provider"], "searxng")
+            self.assertEqual(provider.last_attempts[0]["status"], "error")
+
+    async def test_provider_failover_records_attempts(self):
+        unavailable = AsyncMock(name="primary", configured=True)
+        unavailable.name = "primary"; unavailable.search.side_effect = httpx.ConnectError("offline")
+        working = AsyncMock(name="secondary", configured=True)
+        working.name = "secondary"; working.search.return_value = [{"title": "Role", "url": "https://example.com/job"}]
+        provider = FailoverSearchProvider([unavailable, working])
+        rows = await provider.search("backend careers", freshness="7d")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(provider.last_provider, "secondary")
+        self.assertEqual([attempt["status"] for attempt in provider.last_attempts], ["error", "success"])
 
     async def test_security_and_classification_rules(self):
         token = encrypt_token("secret-token")

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     mistral_model: str = "mistral-small-latest"
     ai_mock_mode: bool = False
     search_provider: str = "searxng"
+    search_provider_order: str = "serper,tavily,ddg,searxng"
+    serper_api_key: str = ""
+    tavily_api_key: str = ""
     searxng_url: str = ""
     search_mock_mode: bool = False
     google_client_id: str = ""
@@ -58,7 +61,6 @@ class Settings(BaseSettings):
             "DATA_DIR": self.data_dir,
             "GEMINI_API_KEY": self.gemini_api_key,
             "MISTRAL_API_KEY": self.mistral_api_key,
-            "SEARXNG_URL": self.searxng_url,
             "GOOGLE_CLIENT_ID": self.google_client_id,
             "GOOGLE_CLIENT_SECRET": self.google_client_secret,
             "GOOGLE_REDIRECT_URI": self.google_redirect_uri,
@@ -78,6 +80,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def search_provider_order_list(self) -> list[str]:
+        return [provider.strip().lower() for provider in self.search_provider_order.split(",") if provider.strip()]
 
     @property
     def resolved_database_url(self) -> str:

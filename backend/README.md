@@ -64,7 +64,7 @@ Backup uses SQLite's consistent backup API, verifies the resulting database, and
 
 As of 2026-08-22, Google OAuth and the controlled real Gmail flow have been verified with mock modes disabled: authorization and encrypted refresh-token storage, approval-first send, exact-thread retrieval, incoming human-reply persistence, classification, application transition, reviewable reply drafting, and zero-change second-sync idempotency all passed. Real automatic replies remained disabled, and no manual reply draft was sent.
 
-The SearXNG implementation is complete but still awaits verification against a configured real instance. Do not treat an unconfigured SearXNG service as a Gmail verification failure.
+The search provider chain has been verified against the live keyless DDG fallback. Serper, Tavily, and SearXNG activate automatically when their optional credentials or URL are configured; an unconfigured optional provider does not make the application unhealthy.
 
 ## Versioned API
 
@@ -80,9 +80,7 @@ The SearXNG implementation is complete but still awaits verification against a c
 
 Every versioned response uses the same `{success, message, data, meta, errors, events}` envelope. Legacy `/api/...` aliases remain available for existing clients. See [FRONTEND_INTEGRATION.md](FRONTEND_INTEGRATION.md).
 
-Phase 2 uses a configured SearXNG instance and never falls back to mock results unless `SEARCH_MOCK_MODE=true`. Greenhouse, Lever, and Ashby public job boards have structured adapters. Static HTML is preferred; optional Playwright rendering is isolated behind `BROWSER_FETCH_ENABLED=true` and limited by the browser settings in `.env.example`.
-
-When `SEARCH_PROVIDER=searxng` but `SEARXNG_URL` is empty, Chably uses a keyless DuckDuckGo HTML search fallback rather than failing the user's search. It returns public job and careers results; configure SearXNG for a controlled production search source.
+Phase 2 uses the configurable `SEARCH_PROVIDER_ORDER` failover chain, which defaults to `serper,tavily,ddg,searxng`. Missing or failed providers are skipped and recorded in non-secret diagnostics. DDG is the zero-configuration fallback, while SearXNG remains optional. Mock results are used only when `SEARCH_MOCK_MODE=true`. Greenhouse, Lever, and Ashby public job boards have structured adapters. Static HTML is preferred; optional Playwright rendering is isolated behind `BROWSER_FETCH_ENABLED=true` and limited by the browser settings in `.env.example`.
 
 Outreach uses per-user Google OAuth, not a shared Gmail account. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, and a Fernet-compatible `TOKEN_ENCRYPTION_KEY`. For local development, the redirect URI is exactly `http://localhost:8000/api/v1/integrations/google/callback`; add that exact value to the Google OAuth client's Authorized redirect URIs. A deployed environment must use its public HTTPS backend origin with the same callback path and an exact matching Google Console entry. Keep the scopes limited to `gmail.send` and `gmail.readonly`, and leave `GOOGLE_OAUTH_MOCK_MODE=false` for real verification. The default is approval-first: a user must approve an outreach draft before Gmail sends it.
 

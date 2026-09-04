@@ -3,19 +3,20 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..data.mock_discovery import mock_results
 from ..models import CandidateProfile, Company, Job, JobSearchSession, Opportunity
 from .embedding_service import EmbeddingService
 from .gemini_provider import GeminiProvider
 from .ats_providers import classify_url
+from .search_providers import (DuckDuckGoProvider, FailoverSearchProvider,
+                               SearchProvider, SearXNGProvider,
+                               get_search_provider)
 
 
 def normalize_domain(url: str) -> str:
@@ -26,85 +27,6 @@ def normalize_domain(url: str) -> str:
     if len(parts) > 2 and parts[0] in {"careers", "career", "jobs", "www"}:
         host = ".".join(parts[1:])
     return host
-
-
-class SearchProvider(ABC):
-    @abstractmethod
-    async def search(self, query: str, limit: int = 10) -> list[dict]: ...
-
-
-class SearXNGProvider(SearchProvider):
-    async def health_check(self) -> bool:
-        if not settings.searxng_url:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-                response = await client.get(
-                    f"{settings.searxng_url.rstrip('/')}/search",
-                    params={"q": "chably health check", "format": "json"},
-                )
-                response.raise_for_status()
-                return isinstance(response.json().get("results"), list)
-        except (httpx.HTTPError, ValueError, TypeError):
-            return False
-
-    async def search(self, query: str, limit: int = 10) -> list[dict]:
-        if not settings.searxng_url:
-            raise RuntimeError("SEARCH_PROVIDER_UNAVAILABLE")
-        async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            try:
-                response = await client.get(f"{settings.searxng_url.rstrip('/')}/search", params={"q": query, "format": "json"})
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise RuntimeError("SEARCH_PROVIDER_UNAVAILABLE") from exc
-            rows = response.json().get("results", [])
-            if not isinstance(rows, list):
-                raise RuntimeError("SEARCH_PROVIDER_INVALID_RESPONSE")
-            return [{"title": str(item.get("title") or ""), "url": str(item.get("url") or ""), "snippet": str(item.get("content") or ""), "engine": ",".join(item.get("engines") or []), "source": "searxng"} for item in rows[:limit] if isinstance(item, dict) and item.get("url")]
-
-
-class DuckDuckGoProvider(SearchProvider):
-    """Keyless public-web fallback used only when a SearXNG instance is not configured."""
-
-    async def search(self, query: str, limit: int = 10) -> list[dict]:
-        from bs4 import BeautifulSoup
-
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; ChablyCareerSearch/1.0)"}
-        try:
-            async with httpx.AsyncClient(timeout=settings.http_timeout_seconds, follow_redirects=True, headers=headers) as client:
-                response = await client.get("https://html.duckduckgo.com/html/", params={"q": query})
-                response.raise_for_status()
-        except httpx.HTTPError:
-            return []
-        soup = BeautifulSoup(response.text, "html.parser")
-        rows = []
-        for link in soup.select("a.result__a")[:limit]:
-            url = link.get("href") or ""
-            parsed = urlparse(url)
-            if "duckduckgo.com" in parsed.netloc:
-                url = unquote((parse_qs(parsed.query).get("uddg") or [""])[0]) or url
-            if not url:
-                continue
-            container = link.find_parent(class_="result")
-            snippet = container.select_one(".result__snippet").get_text(" ", strip=True) if container and container.select_one(".result__snippet") else ""
-            rows.append({"title": link.get_text(" ", strip=True), "url": url, "snippet": snippet, "engine": "duckduckgo", "source": "duckduckgo"})
-        return rows
-
-
-class MockSearchProvider(SearchProvider):
-    async def search(self, query: str, limit: int = 10) -> list[dict]:
-        terms = set(re.findall(r"[a-z]{3,}", query.lower()))
-        rows = mock_results()
-        ranked = sorted(rows, key=lambda row: len(terms & set(re.findall(r"[a-z]{3,}", str(row).lower()))), reverse=True)
-        return ranked[:limit]
-
-
-def get_search_provider() -> SearchProvider:
-    if settings.search_mock_mode:
-        return MockSearchProvider()
-    if settings.search_provider.lower() == "searxng":
-        return SearXNGProvider() if settings.searxng_url else DuckDuckGoProvider()
-    raise RuntimeError("SEARCH_PROVIDER_UNAVAILABLE")
 
 
 class WebsiteFetcher:
@@ -261,7 +183,7 @@ def job_payload(job: Job) -> dict:
     return {"id": job.id, "company_id": job.company_id, "raw_title": job.raw_title, "title": job.title, "description": job.description, "location": job.location, "remote_type": job.remote_type, "employment_type": job.employment_type, "experience_min": job.experience_min, "experience_max": job.experience_max, "skills": job.skills or [], "job_url": job.job_url, "source_url": job.source_url, "source_type": job.source_type, "status": job.status, **(job.data or {})}
 
 
-async def execute_search(db: Session, user_id: str, query: str, search_type: str = "jobs") -> JobSearchSession:
+async def execute_search(db: Session, user_id: str, query: str, search_type: str = "jobs", freshness: str | None = None) -> JobSearchSession:
     profile = db.get(CandidateProfile, user_id)
     if not profile:
         raise LookupError("PROFILE_NOT_FOUND")
@@ -279,13 +201,22 @@ async def execute_search(db: Session, user_id: str, query: str, search_type: str
         # a user's job search unavailable; deterministic parsing remains useful.
     intent = intent or parse_intent_locally(query, profile.data)
     queries = generate_queries(intent)
-    session = JobSearchSession(id=str(uuid.uuid4()), user_id=user_id, search_type=search_type, raw_query=query, structured_intent=intent, search_queries=queries, status="searching", progress={"queries_generated": len(queries), "queries_completed": 0, "companies_discovered": 0, "companies_processed": 0, "jobs_discovered": 0, "jobs_evaluated": 0, "opportunities_created": 0, "failures": 0, "processing_errors": []})
+    if freshness:
+        intent = {**intent, "freshness": freshness}
+    session = JobSearchSession(id=str(uuid.uuid4()), user_id=user_id, search_type=search_type, raw_query=query, structured_intent=intent, search_queries=queries, status="searching", progress={"queries_generated": len(queries), "queries_completed": 0, "companies_discovered": 0, "companies_processed": 0, "jobs_discovered": 0, "jobs_evaluated": 0, "opportunities_created": 0, "providers_used": [], "provider_attempts": [], "failures": 0, "processing_errors": []})
     db.add(session); db.commit()
     provider = get_search_provider()
     discovered = []
+    provider_attempts = []
+    providers_used = []
     for search_query in queries:
-        discovered.extend(await provider.search(search_query, limit=settings.max_search_results_per_query))
-        session.progress = {**session.progress, "queries_completed": session.progress["queries_completed"] + 1}
+        discovered.extend(await provider.search(search_query, limit=settings.max_search_results_per_query, freshness=freshness))
+        attempts = getattr(provider, "last_attempts", [])
+        provider_attempts.extend([{**attempt, "query": search_query, "timestamp": datetime.utcnow().isoformat()} for attempt in attempts])
+        used = getattr(provider, "last_provider", None) or getattr(provider, "name", None)
+        if used and used not in providers_used: providers_used.append(used)
+        session.progress = {**session.progress, "queries_completed": session.progress["queries_completed"] + 1, "providers_used": providers_used, "provider_attempts": provider_attempts, "failures": len([attempt for attempt in provider_attempts if attempt["status"] == "error"])}
+        db.commit()
     vector = EmbeddingService()
     companies, jobs = {}, {}
     for row in discovered:
@@ -299,7 +230,7 @@ async def execute_search(db: Session, user_id: str, query: str, search_type: str
             content = row.get("content") or row.get("snippet") or ""
             raw_title = row.get("title") or "Open position"
             minimum, maximum = extract_experience(content)
-            row = {"company": {"name": domain.split(".")[0].replace("-", " ").title(), "website": f"https://{domain}", "domain": domain, "description": content[:1000], "source_urls": [result_url]}, "job": {"raw_title": raw_title, "title": raw_title, "description": content[:5000], "location": None, "remote_type": None, "employment_type": None, "experience_min": minimum, "experience_max": maximum, "skills": intent.get("skills", []), "seniority": parse_seniority(raw_title), "job_url": result_url, "source_url": result_url, "source_type": settings.search_provider, "status": "unknown"}}
+            row = {"company": {"name": domain.split(".")[0].replace("-", " ").title(), "website": f"https://{domain}", "domain": domain, "description": content[:1000], "source_urls": [result_url]}, "job": {"raw_title": raw_title, "title": raw_title, "description": content[:5000], "location": None, "remote_type": None, "employment_type": None, "experience_min": minimum, "experience_max": maximum, "skills": intent.get("skills", []), "seniority": parse_seniority(raw_title), "job_url": result_url, "source_url": result_url, "source_type": row.get("source") or settings.search_provider, "status": "unknown", "published_at": row.get("published_at")}}
         raw_company, raw_job = row["company"], row["job"]
         domain = normalize_domain(raw_company.get("domain") or raw_company.get("website", ""))
         company = db.query(Company).filter(Company.domain == domain).first()
@@ -339,6 +270,6 @@ async def execute_search(db: Session, user_id: str, query: str, search_type: str
                 opportunity.final_fit_score = match["final_fit_score"]
                 opportunity.analysis = match["analysis"]
             results.append(opportunity)
-    session.status = "completed"; session.results_count = len(results) if search_type == "jobs" else len(companies); session.completed_at = datetime.utcnow(); session.progress = {"queries_generated": len(queries), "queries_completed": len(queries), "companies_discovered": len(companies), "companies_processed": len(companies), "jobs_discovered": len(jobs), "jobs_evaluated": len(results), "opportunities_created": len(results), "failures": 0, "processing_errors": []}
+    session.status = "completed"; session.results_count = len(results) if search_type == "jobs" else len(companies); session.completed_at = datetime.utcnow(); session.progress = {"queries_generated": len(queries), "queries_completed": len(queries), "companies_discovered": len(companies), "companies_processed": len(companies), "jobs_discovered": len(jobs), "jobs_evaluated": len(results), "opportunities_created": len(results), "providers_used": providers_used, "provider_attempts": provider_attempts, "failures": len([attempt for attempt in provider_attempts if attempt["status"] == "error"]), "processing_errors": []}
     db.commit()
     return session

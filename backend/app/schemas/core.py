@@ -32,6 +32,7 @@ class ResumeRewriteBody(BaseModel):
 class DiscoveryRequest(BaseModel):
     user_id: str
     query: str = Field(min_length=3, max_length=1000)
+    freshness: Optional[str] = Field(default=None, pattern="^(24h|48h|day|7d|week|month|year)$")
 
 class SavedJobRequest(BaseModel):
     user_id: str
