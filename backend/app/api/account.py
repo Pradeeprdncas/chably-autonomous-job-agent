@@ -14,6 +14,7 @@ from ..models import (AIUsage, Application, ApplicationEvent, Artifact, AuthSess
 from ..schemas.core import OutreachSettingsBody
 from ..services.embedding_service import EmbeddingService
 from ..services.job_discovery import company_payload, job_payload
+from ..services.ats_providers import classify_url
 from .outreach import application_payload, outreach_payload
 from .utils import normalize_profile, ok
 
@@ -57,15 +58,26 @@ def outreach_list(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, g
     query = db.query(Outreach).filter(Outreach.user_id == user.id)
     if status: query = query.filter(Outreach.status == status)
     rows = query.order_by(Outreach.created_at.desc()).offset(offset).limit(limit).all()
-    return ok("Outreach loaded", {"outreach": [outreach_payload(row) for row in rows]})
+    return ok("Outreach loaded", {"outreach": [outreach_payload(row, db) for row in rows]})
 
 
 @router.get("/api/v1/opportunities")
 def opportunity_list(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), status: str = "", minimum_fit: float = Query(0, ge=0, le=100), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     query = db.query(Opportunity).filter(Opportunity.user_id == user.id, Opportunity.final_fit_score >= minimum_fit)
     if status: query = query.filter(Opportunity.status == status)
-    rows = query.order_by(Opportunity.final_fit_score.desc()).offset(offset).limit(limit).all()
-    return ok("Opportunities loaded", {"opportunities": [{"id": row.id, "job_id": row.job_id, "company_id": row.company_id, "status": row.status, "fit_score": row.final_fit_score, "analysis": row.analysis, "job": job_payload(db.get(Job, row.job_id)), "company": company_payload(db.get(Company, row.company_id))} for row in rows]})
+    rows = query.order_by(Opportunity.final_fit_score.desc()).all()
+    output = []
+    seen_jobs: set[tuple[str, str]] = set()
+    for row in rows:
+        job = db.get(Job, row.job_id); company = db.get(Company, row.company_id)
+        if not job or not company or (classify_url(job.job_url) != "job_page" and not (job.source_type or "").startswith("mock")):
+            continue
+        dedupe_key = ((company.name or "").strip().lower(), " ".join((job.title or "").lower().split()))
+        if dedupe_key in seen_jobs:
+            continue
+        seen_jobs.add(dedupe_key)
+        output.append({"id": row.id, "job_id": row.job_id, "company_id": row.company_id, "status": row.status, "fit_score": row.final_fit_score, "analysis": row.analysis, "job": job_payload(job), "company": company_payload(company)})
+    return ok("Opportunities loaded", {"opportunities": output[offset:offset + limit]})
 
 
 @router.get("/api/v1/settings")

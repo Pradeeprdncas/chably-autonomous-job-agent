@@ -108,12 +108,29 @@ def appears_javascript_only(html: str, meaningful_text: str) -> bool:
 
 
 def classify_url(url: str) -> str:
-    value = url.lower(); host = urlparse(url).hostname or ""
-    if any(domain in host for domain in ("greenhouse.io", "lever.co", "ashbyhq.com")): return "ats_page"
-    if re.search(r"/(jobs?|positions?|openings?)/[^/]+", value): return "job_page"
+    value = url.lower(); parsed = urlparse(url); host = parsed.hostname or ""; path = parsed.path.rstrip("/")
+    # These are third-party listing/search sites rather than canonical employer
+    # postings.  Keep the explicitly supported public job boards below, but do
+    # not turn search-result landing pages into opportunities.
+    if any(domain in host for domain in ("naukri.com", "foundit.", "cutshort.io", "remoterocketship.com", "wantremote.com", "glassdoor.")):
+        return "irrelevant"
+    if "linkedin.com" in host:
+        return "job_page" if re.search(r"/jobs/view/(?:[^/]*-)?\d+", path) else "irrelevant"
+    if "wellfound.com" in host:
+        return "job_page" if re.search(r"/jobs/\d+(?:-|/|$)", path) else "irrelevant"
+    if "indeed.com" in host:
+        return "job_page" if path.endswith("/viewjob") and "jk=" in parsed.query else "irrelevant"
+    if "lever.co" in host:
+        return "job_page" if len([part for part in path.split("/") if part]) >= 2 else "ats_page"
+    if "greenhouse.io" in host:
+        return "job_page" if re.search(r"/jobs/\d+", path) or "gh_jid=" in parsed.query else "ats_page"
+    if "ashbyhq.com" in host:
+        return "job_page" if len([part for part in path.split("/") if part]) >= 2 else "ats_page"
+    if re.search(r"/(jobs?|positions?|openings?)/(?:[^/]+/)*[^/]*\d[^/]*", path): return "job_page"
+    if re.search(r"/job/(?:[^/]+/)*[^/]+", path): return "job_page"
     if any(term in value for term in ("/careers", "/jobs", "/join-us", "/openings")): return "company_careers"
     if "/about" in value: return "company_about"
     if any(term in value for term in ("/product", "/platform", "/services")): return "company_product"
     if urlparse(url).path in ("", "/"): return "company_homepage"
-    if any(term in host for term in ("linkedin.com", "indeed.com", "glassdoor.com", "wikipedia.org")): return "irrelevant"
+    if "wikipedia.org" in host: return "irrelevant"
     return "irrelevant"

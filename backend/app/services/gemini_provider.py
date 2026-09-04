@@ -14,6 +14,52 @@ from ..prompts.resume_prompts import (
 EMPTY = {"personal_information": {"name": None, "email": None, "phone": None, "location": None, "linkedin": None, "github": None, "portfolio": None}, "professional_summary": None, "education": [], "experience": [], "projects": [], "skills": {"programming_languages": [], "frameworks": [], "databases": [], "ai_ml": [], "cloud": [], "devops": [], "tools": [], "other": []}, "certifications": [], "achievements": [], "career_preferences": {"target_roles": [], "preferred_locations": [], "remote_preference": None, "company_type": [], "preferred_domains": [], "salary_expectation": None, "notice_period": None}}
 usage_logger = logging.getLogger("chably.ai_usage")
 
+
+def deterministic_role_recommendations(profile: dict, roles: list[dict]) -> list[dict]:
+    skill_buckets = profile.get("skills") or {}
+    skills = {str(skill).lower() for values in skill_buckets.values() if isinstance(values, list) for skill in values}
+    narrative = " ".join([
+        str(profile.get("professional_summary") or ""),
+        " ".join(str(item) for item in profile.get("experience") or []),
+        " ".join(str(item) for item in profile.get("projects") or []),
+    ]).lower()
+
+    def has(signal: str) -> bool:
+        value = signal.lower()
+        aliases = {
+            "ai/ml": bool(skill_buckets.get("ai_ml")) or any(term in skills for term in ("rag", "llm applications", "agentic ai", "machine learning")),
+            "apis": any(term in skills for term in ("rest apis", "async apis", "fastapi", "api integrations")),
+            "databases": bool(skill_buckets.get("databases")),
+            "cloud": bool(skill_buckets.get("cloud")) or any("cloud" in term for term in skills),
+            "software engineering": bool(profile.get("experience")),
+            "communication": any("communication" in term for term in skills),
+            "testing": any(term in skills for term in ("pytest", "testing", "test automation")),
+        }
+        return aliases.get(value, value in skills or value in narrative)
+
+    recommendations = []
+    for role in roles:
+        required = role.get("required_skills") or []
+        preferred = role.get("preferred_skills") or []
+        matched_required = [skill for skill in required if has(skill)]
+        matched_preferred = [skill for skill in preferred if has(skill)]
+        title_terms = [term for term in re.findall(r"[a-z]+", role.get("role", "").lower()) if term not in {"engineer", "developer"}]
+        role_evidence = bool(title_terms and any(term in narrative for term in title_terms))
+        score = round(42 + 35 * len(matched_required) / max(1, len(required)) + 15 * len(matched_preferred) / max(1, len(preferred)) + (8 if role_evidence else 0))
+        score = min(96, score)
+        recommendations.append({
+            "title": role["role"],
+            "fit_score": score,
+            "summary": role.get("description", ""),
+            "matched_skills": matched_required + matched_preferred,
+            "missing_skills": [skill for skill in required + preferred if skill not in matched_required + matched_preferred],
+            "strengths": [f"Evidence supports {skill}." for skill in (matched_required + matched_preferred)[:4]],
+            "evidence": ["Relevant experience and projects are present in the candidate profile."] if role_evidence else [],
+            "gaps": [f"Add evidence for {skill} if you have it." for skill in (required + preferred) if skill not in matched_required + matched_preferred][:3],
+            "recommended_actions": [f"Tailor the resume headline and strongest evidence toward {role['role']} roles."],
+        })
+    return sorted(recommendations, key=lambda item: item["fit_score"], reverse=True)[:7]
+
 def _usage(provider, model, operation, started, success, usage=None):
     usage_logger.info(json.dumps({"timestamp": time.time(), "provider": provider, "model": model, "operation": operation, "success": success, "latency_ms": round((time.perf_counter() - started) * 1000), "input_tokens": (usage or {}).get("input_tokens"), "output_tokens": (usage or {}).get("output_tokens")}, separators=(",", ":")))
 
@@ -99,20 +145,7 @@ class GeminiProvider(AIProvider):
             result = result.get("roles") or result.get("recommendations") or result.get("items")
         if isinstance(result, list) and all(isinstance(role, dict) for role in result):
             return result
-        return [
-            {
-                "title": r["role"],
-                "fit_score": max(45, 86 - (i * 7)) if settings.ai_mock_mode else 55,
-                "summary": f"Potential alignment with {r['role']} responsibilities.",
-                "matched_skills": r.get("required_skills", [])[:4],
-                "missing_skills": r.get("preferred_skills", [])[:2],
-                "strengths": ["Relevant listed skills and project evidence."],
-                "evidence": [],
-                "gaps": ["More verified impact evidence would improve confidence."],
-                "recommended_actions": ["Add quantified ownership evidence where truthful."],
-            }
-            for i, r in enumerate(roles[:5])
-        ]
+        return deterministic_role_recommendations(profile, roles)
 
     async def analyze_resume(self, profile, original):
         result = await self._json(ANALYZE_RESUME + "\nReturn resume_score,missing_information,weak_sections,strong_sections,skills_to_highlight,experience_improvements,project_improvements,summary_improvement,recommended_role_positioning.", {"profile":profile,"original_resume":original})

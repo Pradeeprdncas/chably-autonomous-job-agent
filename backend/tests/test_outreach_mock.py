@@ -75,6 +75,9 @@ class OutreachMockTest(unittest.TestCase):
         sent_response = self.client.post(f"/api/v1/outreach/{draft['id']}/send", params={"user_id": "demo-user"})
         self.assertEqual(sent_response.status_code, 200, sent_response.text)
         sent = sent_response.json()["data"]
+        thread_list = self.client.get("/api/v1/gmail/threads").json()["data"]["threads"]
+        self.assertEqual(thread_list[0]["thread_id"], sent["gmail_thread_id"])
+        self.assertEqual(thread_list[0]["reply_status"], "awaiting_reply")
         application_response = self.client.post(f"/api/v1/opportunities/{item['opportunity_id']}/application", params={"user_id": "demo-user"}, json={"status": "contacted"})
         application_id = application_response.json()["data"]["id"]
 
@@ -83,6 +86,9 @@ class OutreachMockTest(unittest.TestCase):
         self.assertEqual(first["new_replies"], 1)
         self.assertEqual(first["drafts_created"], 1)
         self.assertEqual(first["applications_updated"], 1)
+        synced_thread = self.client.get(f"/api/v1/gmail/threads/{sent['gmail_thread_id']}").json()["data"]["thread"]
+        self.assertEqual(synced_thread["reply_status"], "replied")
+        self.assertGreaterEqual(len(synced_thread["messages"]), 1)
         self.assertEqual(first["auto_replies_sent"], 0)
         second = self.client.post("/api/v1/integrations/google/demo-user/sync").json()["data"]
         self.assertEqual(second["new_messages"], 0)

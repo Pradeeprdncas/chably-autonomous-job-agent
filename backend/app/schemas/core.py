@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 class ProfilePatch(BaseModel):
     data: dict[str, Any]
@@ -33,6 +33,8 @@ class DiscoveryRequest(BaseModel):
     user_id: str
     query: str = Field(min_length=3, max_length=1000)
     freshness: Optional[str] = Field(default=None, pattern="^(24h|48h|day|7d|week|month|year)$")
+    sources: list[Literal["official", "ats", "wellfound", "linkedin"]] = Field(default_factory=list)
+    search_mode: Literal["intent", "boolean"] = "intent"
 
 class SavedJobRequest(BaseModel):
     user_id: str

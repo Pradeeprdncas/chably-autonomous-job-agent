@@ -22,10 +22,23 @@ from .http_middleware import request_context_middleware
 async def lifespan(app: FastAPI):
     settings.validate_production()
     Base.metadata.create_all(bind=engine)
+    # Older drafts predate the application tracker.  Reconcile them once at
+    # startup so the Applications view is useful instead of silently empty.
+    from .database import SessionLocal
+    from .models import Outreach
+    from .api.outreach import _ensure_application
     from .services.embedding_service import EmbeddingService
     from .data.job_taxonomy import ROLES
 
     EmbeddingService().upsert_job_taxonomy(ROLES)
+    db = SessionLocal()
+    try:
+        for outreach in db.query(Outreach).all():
+            status = "email_sent" if outreach.status == "sent" else "email_approved" if outreach.status == "approved" else "outreach_ready"
+            _ensure_application(db, outreach, status)
+        db.commit()
+    finally:
+        db.close()
     yield
 
 

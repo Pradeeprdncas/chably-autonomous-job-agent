@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Application, ApplicationEvent, CandidateProfile, Company, Contact, GoogleConnection, Job, OAuthState, Opportunity, Outreach, OutreachSettings, ReplyAnalysis, ReplyDraft, User
+from ..models import Application, ApplicationEvent, CandidateProfile, Company, Contact, GmailMessage, GoogleConnection, Job, OAuthState, Opportunity, Outreach, OutreachSettings, ReplyAnalysis, ReplyDraft, User
 from ..auth import enforce_user, get_current_user
 from ..schemas.core import ApplicationBody, ApplicationPatch, OutreachSettingsBody
 from ..services.gemini_provider import GeminiProvider
@@ -26,7 +26,61 @@ def connection_payload(connection):
     scopes = public_scopes(connection.scopes) if connection else []
     return {"connected": status == "active", "email": connection.google_email if connection else None, "scopes": scopes, "status": status, "reauth_required": status == "reauth_required", "capabilities": {"send": "gmail.send" in scopes or "gmail.modify" in scopes, "reply_tracking": "gmail.readonly" in scopes or "gmail.modify" in scopes}}
 def contact_payload(contact): return {"id": contact.id, "name": contact.name, "email": contact.email, "role": contact.role, "source_url": contact.source_url, "source_type": contact.source_type, "confidence": contact.confidence, "verification_status": contact.verification_status}
-def outreach_payload(outreach): return {"id": outreach.id, "status": outreach.status, "subject": outreach.subject, "body": outreach.body, "contact_id": outreach.contact_id, "gmail_message_id": outreach.gmail_message_id, "gmail_thread_id": outreach.gmail_thread_id, "created_at": outreach.created_at.isoformat(), "sent_at": outreach.sent_at.isoformat() if outreach.sent_at else None}
+def outreach_payload(outreach, db: Session | None = None):
+    payload = {"id": outreach.id, "opportunity_id": outreach.opportunity_id, "status": outreach.status, "subject": outreach.subject, "body": outreach.body, "contact_id": outreach.contact_id, "gmail_message_id": outreach.gmail_message_id, "gmail_thread_id": outreach.gmail_thread_id, "created_at": outreach.created_at.isoformat(), "sent_at": outreach.sent_at.isoformat() if outreach.sent_at else None}
+    if db:
+        opportunity = db.get(Opportunity, outreach.opportunity_id)
+        contact = db.get(Contact, outreach.contact_id)
+        job = db.get(Job, opportunity.job_id) if opportunity else None
+        company = db.get(Company, opportunity.company_id) if opportunity else None
+        application = db.query(Application).filter(Application.user_id == outreach.user_id, Application.opportunity_id == outreach.opportunity_id).first()
+        payload.update({"recipient": contact_payload(contact) if contact else None, "job": {"id": job.id, "title": job.title, "job_url": job.job_url} if job else None, "company": {"id": company.id, "name": company.name} if company else None, "application_id": application.id if application else None})
+    return payload
+
+
+def _ensure_application(db: Session, outreach: Outreach, status: str) -> Application:
+    opportunity = db.get(Opportunity, outreach.opportunity_id)
+    application = db.query(Application).filter(Application.user_id == outreach.user_id, Application.opportunity_id == outreach.opportunity_id).first()
+    old_status = application.status if application else None
+    if not application:
+        application = Application(id=str(uuid.uuid4()), user_id=outreach.user_id, opportunity_id=opportunity.id, job_id=opportunity.job_id, company_id=opportunity.company_id, outreach_id=outreach.id, status=status)
+        db.add(application)
+    else:
+        application.outreach_id = outreach.id
+        application.status = status
+        application.last_activity_at = datetime.utcnow()
+    if old_status != status:
+        event_type = {"outreach_ready": "OUTREACH_DRAFTED", "email_approved": "EMAIL_APPROVED", "email_sent": "EMAIL_SENT"}.get(status, "APPLICATION_UPDATED")
+        db.add(ApplicationEvent(id=str(uuid.uuid4()), application_id=application.id, event_type=event_type, old_status=old_status, new_status=status, source="outreach", data={"outreach_id": outreach.id}))
+    return application
+
+
+def gmail_thread_payload(outreach: Outreach, db: Session, include_messages: bool = False) -> dict:
+    messages = db.query(GmailMessage).filter(GmailMessage.outreach_id == outreach.id).order_by(GmailMessage.received_at, GmailMessage.processed_at).all()
+    opportunity = db.get(Opportunity, outreach.opportunity_id)
+    job = db.get(Job, opportunity.job_id) if opportunity else None
+    company = db.get(Company, opportunity.company_id) if opportunity else None
+    contact = db.get(Contact, outreach.contact_id)
+    application = db.query(Application).filter(Application.user_id == outreach.user_id, Application.opportunity_id == outreach.opportunity_id).first()
+    latest = messages[-1] if messages else None
+    analysis = db.get(ReplyAnalysis, latest.gmail_message_id) if latest and latest.direction == "incoming" else None
+    payload = {
+        "thread_id": outreach.gmail_thread_id,
+        "outreach_id": outreach.id,
+        "subject": latest.subject if latest and latest.subject else outreach.subject,
+        "participants": list(dict.fromkeys(([contact.email] if contact else []) + [message.sender for message in messages if message.sender])),
+        "latest_message": (latest.body if latest else outreach.body)[:360],
+        "timestamp": (latest.received_at or latest.processed_at).isoformat() if latest and (latest.received_at or latest.processed_at) else (outreach.sent_at or outreach.created_at).isoformat(),
+        "direction": latest.direction if latest else "outgoing",
+        "reply_status": "replied" if any(message.direction == "incoming" for message in messages) else "awaiting_reply",
+        "classification": analysis.category if analysis else None,
+        "company": {"id": company.id, "name": company.name} if company else None,
+        "job": {"id": job.id, "title": job.title, "job_url": job.job_url} if job else None,
+        "application": {"id": application.id, "status": application.status} if application else None,
+    }
+    if include_messages:
+        payload["messages"] = [{"id": message.gmail_message_id, "sender": message.sender, "recipients": message.recipients, "subject": message.subject, "body": message.body, "direction": message.direction, "message_type": message.message_type, "timestamp": (message.received_at or message.processed_at).isoformat() if (message.received_at or message.processed_at) else None} for message in messages]
+    return payload
 
 def require_owner(resource, user_id: str, code: str):
     if not resource or getattr(resource, "user_id", None) != user_id:
@@ -104,18 +158,21 @@ async def draft_email(opportunity_id: str, user_id: str = Query(...), contact_id
             contact = Contact(id=str(uuid.uuid4()), company_id=company.id, email=recipient_email, source_url="", source_type="user_provided", confidence=1.0, verification_status="user_provided"); db.add(contact); db.flush()
     if not contact or contact.company_id != company.id: fail(404, "CONTACT_NOT_FOUND", "No public contact is available for this opportunity.")
     existing = db.query(Outreach).filter(Outreach.user_id == user_id, Outreach.opportunity_id == opportunity.id, Outreach.contact_id == contact.id).first()
-    if existing: return ok("Existing outreach draft loaded", {"outreach": outreach_payload(existing), "contact": contact_payload(contact)})
+    if existing:
+        _ensure_application(db, existing, "email_sent" if existing.status == "sent" else "email_approved" if existing.status == "approved" else "outreach_ready")
+        db.commit()
+        return ok("Existing outreach draft loaded", {"outreach": outreach_payload(existing, db), "contact": contact_payload(contact)})
     name = (profile.data.get("personal_information") or {}).get("name") or "the candidate"; strengths = [skill for values in (profile.data.get("skills") or {}).values() if isinstance(values, list) for skill in values][:2]
     subject = f"Interest in {job.title} at {company.name}"; body = f"Hello,\n\nI’m {name}, and I’m interested in the {job.title} role at {company.name}. My background includes {', '.join(strengths) or 'relevant engineering work'}, which aligns with the role’s requirements.\n\nI’d appreciate the opportunity to be considered.\n\nBest,\n{name}"
-    outreach = Outreach(id=str(uuid.uuid4()), user_id=user_id, opportunity_id=opportunity.id, contact_id=contact.id, subject=subject, body=body); db.add(outreach); db.commit()
-    return ok("Outreach draft created", {"outreach": outreach_payload(outreach), "contact": contact_payload(contact), "reasoning_summary": "Uses verified candidate skills and the specific job title."}, events=[{"type":"OUTREACH_DRAFTED","label":"Outreach draft created"}])
+    outreach = Outreach(id=str(uuid.uuid4()), user_id=user_id, opportunity_id=opportunity.id, contact_id=contact.id, subject=subject, body=body); db.add(outreach); db.flush(); _ensure_application(db, outreach, "outreach_ready"); db.commit()
+    return ok("Outreach draft created", {"outreach": outreach_payload(outreach, db), "contact": contact_payload(contact), "reasoning_summary": "Uses verified candidate skills and the specific job title."}, events=[{"type":"OUTREACH_DRAFTED","label":"Outreach draft created"}])
 
 @router.post("/api/v1/outreach/{outreach_id}/approve")
 def approve_outreach(outreach_id: str, user_id: str = Query(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_user(user_id, current_user)
     outreach = require_owner(db.get(Outreach, outreach_id), user_id, "OUTREACH_NOT_FOUND")
     if outreach.status != "draft": fail(400, "OUTREACH_NOT_DRAFT", "Only drafts can be approved.")
-    outreach.status = "approved"; db.commit(); return ok("Outreach approved", outreach_payload(outreach), events=[{"type":"OUTREACH_APPROVED","label":"Outreach approved"}])
+    outreach.status = "approved"; application = _ensure_application(db, outreach, "email_approved"); application.last_activity_at = datetime.utcnow(); db.commit(); return ok("Outreach approved", outreach_payload(outreach, db), events=[{"type":"OUTREACH_APPROVED","label":"Outreach approved"}])
 
 @router.post("/api/v1/outreach/{outreach_id}/send")
 async def send_outreach(outreach_id: str, user_id: str = Query(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -126,13 +183,29 @@ async def send_outreach(outreach_id: str, user_id: str = Query(...), db: Session
     contact = db.get(Contact, outreach.contact_id); token = await token_for(db, outreach.user_id, "gmail.send")
     try: result = await GmailService().send_email(token, contact.email, outreach.subject, outreach.body)
     except Exception: outreach.status = "failed"; db.commit(); fail(502, "GMAIL_SEND_FAILED", "Gmail could not send this outreach.")
-    outreach.status = "sent"; outreach.gmail_message_id = result.get("id"); outreach.gmail_thread_id = result.get("threadId"); outreach.sent_at = datetime.utcnow(); db.commit(); return ok("Outreach sent", outreach_payload(outreach), events=[{"type":"EMAIL_SENT","label":"Email sent"}])
+    outreach.status = "sent"; outreach.gmail_message_id = result.get("id"); outreach.gmail_thread_id = result.get("threadId"); outreach.sent_at = datetime.utcnow(); application = _ensure_application(db, outreach, "email_sent"); application.applied_at = application.applied_at or datetime.utcnow(); db.commit(); return ok("Outreach sent", outreach_payload(outreach, db), events=[{"type":"EMAIL_SENT","label":"Email sent"}])
+
+
+@router.get("/api/v1/gmail/threads")
+def gmail_threads(folder: str = Query("all", pattern="^(all|sent|replies)$"), limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    rows = db.query(Outreach).filter(Outreach.user_id == current_user.id, Outreach.gmail_thread_id.isnot(None)).order_by(Outreach.sent_at.desc()).all()
+    payloads = [gmail_thread_payload(row, db) for row in rows]
+    if folder == "replies": payloads = [item for item in payloads if item["reply_status"] == "replied"]
+    if folder == "sent": payloads = [item for item in payloads if item["direction"] == "outgoing"]
+    return ok("Gmail threads loaded", {"threads": payloads[offset:offset + limit], "total": len(payloads)})
+
+
+@router.get("/api/v1/gmail/threads/{thread_id}")
+def gmail_thread(thread_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    outreach = db.query(Outreach).filter(Outreach.user_id == current_user.id, Outreach.gmail_thread_id == thread_id).first()
+    if not outreach: fail(404, "THREAD_NOT_FOUND", "Gmail thread not found.")
+    return ok("Gmail thread loaded", {"thread": gmail_thread_payload(outreach, db, True)})
 
 @router.get("/api/v1/outreach/{outreach_id}")
 def get_outreach(outreach_id: str, user_id: str = Query(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     enforce_user(user_id, current_user)
     outreach = require_owner(db.get(Outreach, outreach_id), user_id, "OUTREACH_NOT_FOUND")
-    return ok("Outreach loaded", {"outreach": outreach_payload(outreach), "contact": contact_payload(db.get(Contact, outreach.contact_id))})
+    return ok("Outreach loaded", {"outreach": outreach_payload(outreach, db), "contact": contact_payload(db.get(Contact, outreach.contact_id))})
 
 @router.get("/api/v1/outreach/{outreach_id}/thread")
 async def outreach_thread(outreach_id: str, user_id: str = Query(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -182,11 +255,13 @@ async def sync_google(user_id: str, db: Session = Depends(get_db), current_user:
     return ok("Gmail replies synchronized", result)
 
 def application_payload(application, db: Session | None = None):
-    payload = {"id": application.id, "opportunity_id": application.opportunity_id, "status": application.status, "source": application.source, "applied_at": application.applied_at.isoformat() if application.applied_at else None, "notes": application.notes}
+    payload = {"id": application.id, "opportunity_id": application.opportunity_id, "outreach_id": application.outreach_id, "status": application.status, "source": application.source, "applied_at": application.applied_at.isoformat() if application.applied_at else None, "last_activity_at": application.last_activity_at.isoformat(), "notes": application.notes}
     if db:
         job, company = db.get(Job, application.job_id), db.get(Company, application.company_id)
         payload["job"] = {"id": job.id, "title": job.title, "location": job.location, "job_url": job.job_url} if job else None
         payload["company"] = {"id": company.id, "name": company.name} if company else None
+        outreach = db.get(Outreach, application.outreach_id) if application.outreach_id else None
+        payload["email"] = {"subject": outreach.subject, "status": outreach.status, "sent_at": outreach.sent_at.isoformat() if outreach.sent_at else None, "gmail_thread_id": outreach.gmail_thread_id} if outreach else None
     return payload
 
 @router.post("/api/v1/opportunities/{opportunity_id}/application")

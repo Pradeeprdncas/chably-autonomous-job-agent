@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -13,7 +14,7 @@ from ..config import settings
 from ..models import CandidateProfile, Company, Job, JobSearchSession, Opportunity
 from .embedding_service import EmbeddingService
 from .gemini_provider import GeminiProvider
-from .ats_providers import classify_url
+from .ats_providers import classify_url, provider_for
 from .search_providers import (DuckDuckGoProvider, FailoverSearchProvider,
                                SearchProvider, SearXNGProvider,
                                get_search_provider)
@@ -90,16 +91,139 @@ def parse_intent_locally(query: str, profile: dict) -> dict:
 def generate_queries(intent: dict) -> list[str]:
     roles = intent.get("roles") or ["Software Engineer"]
     locations = intent.get("locations") or (["Remote"] if intent.get("remote") else [""])
-    suffix = " startup" if "startup" in (intent.get("company_types") or []) else ""
+    skills = intent.get("skills") or []
+    sources = intent.get("sources") or ["official", "ats", "wellfound", "linkedin"]
+    role_clause = " OR ".join(f'\"{role}\"' for role in roles[:3])
+    skill_clause = " ".join(skills[:2])
+    location_clause = " ".join(locations[:3])
+    is_boolean = intent.get("search_mode") == "boolean" and str(intent.get("raw_query") or "").strip()
+    base = str(intent.get("raw_query") or "").strip() if is_boolean else " ".join(value for value in (roles[0], skill_clause, location_clause) if value)
+    if not is_boolean and "startup" in (intent.get("company_types") or []):
+        base += " startup"
     queries = []
-    for role in roles[:4]:
-        for location in locations[:2]:
-            queries.append(f'"{role}" {location}{suffix} careers'.strip())
+    if "official" in sources:
+        queries.append(f'{base} careers jobs -courses -salary -guide')
+    if "ats" in sources:
+        queries.append(f'{base if is_boolean else skill_clause or roles[0]} site:jobs.lever.co OR site:boards.greenhouse.io OR site:jobs.ashbyhq.com')
+    if "wellfound" in sources:
+        for role in roles[:2]:
+            query_base = base if is_boolean else f"{role} Python"
+            queries.append(f'{query_base} site:wellfound.com/jobs')
+    if "linkedin" in sources:
+        for role in roles[:2]:
+            query_base = base if is_boolean else f"{role} {skill_clause} {location_clause or 'India'}"
+            queries.append(f'{query_base} site:linkedin.com/jobs/view')
+            queries.append(f'{query_base} jobs')
+    if not queries:
+        queries.append(f'{base} careers')
     return list(dict.fromkeys(queries))[:settings.max_search_queries_per_request]
+
+
+def _profile_roles(profile: dict) -> list[str]:
+    text = " ".join([
+        str(profile.get("professional_summary") or ""),
+        " ".join(str(item.get("title") or item.get("role") or "") for item in profile.get("experience") or [] if isinstance(item, dict)),
+    ]).lower()
+    roles = []
+    for title, terms in (
+        ("Applied AI Engineer", ("applied ai", "llm", "rag", "agentic")),
+        ("AI Engineer", ("ai engineer", "ai/", "machine learning")),
+        ("Backend Engineer", ("backend", "fastapi", "api")),
+        ("Python Developer", ("python",)),
+    ):
+        if any(term in text for term in terms):
+            roles.append(title)
+    return roles or ["Backend Engineer", "Applied AI Engineer"]
+
+
+def complete_intent(intent: dict, profile: dict, sources: list[str] | None = None, search_mode: str = "intent") -> dict:
+    result = dict(intent or {})
+    preferences = profile.get("career_preferences") or {}
+    result["roles"] = list(result.get("roles") or preferences.get("target_roles") or _profile_roles(profile))[:5]
+    result["skills"] = list(result.get("skills") or [skill for values in (profile.get("skills") or {}).values() if isinstance(values, list) for skill in values])[:8]
+    result["locations"] = list(result.get("locations") or preferences.get("preferred_locations") or [])[:4]
+    result["remote"] = bool(result.get("remote") or str(preferences.get("remote_preference") or "").lower() in {"remote", "hybrid", "yes"})
+    if result.get("experience_max_years") is None:
+        result["experience_max_years"] = 4
+    result["sources"] = list(dict.fromkeys(sources or result.get("sources") or ["official", "ats", "wellfound", "linkedin"]))
+    result["search_mode"] = search_mode
+    return result
+
+
+def source_name(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    if "linkedin.com" in host: return "linkedin"
+    if "wellfound.com" in host: return "wellfound"
+    if "lever.co" in host: return "lever"
+    if "greenhouse.io" in host: return "greenhouse"
+    if "ashbyhq.com" in host: return "ashby"
+    return "company_careers"
+
+
+def company_identity(url: str, title: str = "") -> tuple[str, str, str]:
+    parsed = urlparse(url); host = (parsed.hostname or "").lower(); parts = [part for part in parsed.path.split("/") if part]
+    if "linkedin.com" in host:
+        match = re.match(r"(.+?)\s+hiring\s+", title or "", re.I)
+        name = match.group(1).strip() if match else "LinkedIn company not identified"
+        return name, "https://www.linkedin.com", f"linkedin-{re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')}"
+    if "wellfound.com" in host:
+        match = re.search(r"\s+at\s+(.+?)(?:\s+•|\s+\||$)", title or "", re.I)
+        name = match.group(1).strip() if match else "Wellfound company not identified"
+        return name, "https://wellfound.com", f"wellfound-{re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')}"
+    if "lever.co" in host and parts: slug = parts[0]; return slug.replace("-", " ").title(), f"https://jobs.lever.co/{slug}", f"{slug}.lever.co"
+    if "greenhouse.io" in host and parts: slug = parts[0]; return slug.replace("-", " ").title(), f"https://boards.greenhouse.io/{slug}", f"{slug}.greenhouse.io"
+    if "ashbyhq.com" in host and parts: slug = parts[0]; return slug.replace("-", " ").title(), f"https://jobs.ashbyhq.com/{slug}", f"{slug}.ashbyhq.com"
+    clean_title = re.split(r"\s(?:\||—|-|at)\s", title or "", maxsplit=2)
+    name = clean_title[1].strip() if len(clean_title) > 1 and len(clean_title[1].strip()) < 100 else normalize_domain(url).split(".")[0].replace("-", " ").title()
+    domain = normalize_domain(url)
+    return name or "Company", f"https://{domain}", domain
+
+
+def parse_job_posting_html(html: str) -> dict:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html or "", "html.parser")
+    values = []
+    for node in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            payload = json.loads(node.string or node.get_text() or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        values.extend(payload if isinstance(payload, list) else payload.get("@graph", []) if isinstance(payload, dict) and isinstance(payload.get("@graph"), list) else [payload])
+    posting = next((item for item in values if isinstance(item, dict) and "JobPosting" in ([item.get("@type")] if isinstance(item.get("@type"), str) else item.get("@type") or [])), None)
+    if not posting:
+        return {}
+    location = posting.get("jobLocation") or []
+    if isinstance(location, dict): location = [location]
+    addresses = [item.get("address") or {} for item in location if isinstance(item, dict)]
+    location_text = ", ".join(filter(None, [", ".join(filter(None, [address.get("addressLocality"), address.get("addressRegion"), address.get("addressCountry")])) for address in addresses]))
+    organization = posting.get("hiringOrganization") or {}
+    return {"title": posting.get("title"), "description": CareerPageParser().clean_text(str(posting.get("description") or "")), "location": location_text or None, "employment_type": posting.get("employmentType"), "company_name": organization.get("name") if isinstance(organization, dict) else None, "posted_date": posting.get("datePosted")}
 
 
 def candidate_skills(profile: dict) -> set[str]:
     return {str(skill).lower() for values in (profile.get("skills") or {}).values() if isinstance(values, list) for skill in values}
+
+
+def extract_job_skills(text: str) -> list[str]:
+    value = f" {re.sub(r'[^a-z0-9+#./-]+', ' ', (text or '').lower())} "
+    known = ["Python", "FastAPI", "Django", "Flask", "JavaScript", "TypeScript", "React", "Node.js", "PostgreSQL", "MySQL", "MongoDB", "Redis", "Qdrant", "Kafka", "Docker", "Kubernetes", "AWS", "Azure", "GCP", "LLM", "RAG", "Machine Learning", "NLP", "REST APIs"]
+    aliases = {"Node.js": ("node.js", "nodejs"), "PostgreSQL": ("postgresql", "postgres"), "Machine Learning": ("machine learning",), "REST APIs": ("rest api", "restful api"), "LLM": ("llm", "large language model"), "RAG": ("rag", "retrieval augmented")}
+    return [skill for skill in known if any(term in value for term in aliases.get(skill, (skill.lower(),)))]
+
+
+def relevant_job(job: dict, intent: dict) -> bool:
+    title = str(job.get("title") or job.get("raw_title") or "").lower()
+    details = f"{title} {job.get('description') or ''}".lower()
+    if not title or title.startswith("jobs at ") or "job application for" in title:
+        return False
+    role_terms = ["applied ai", "ai engineer", "backend", "python", "machine learning", "ml engineer", "software engineer"]
+    requested = [role.lower() for role in intent.get("roles") or []]
+    role_match = any(term in title for term in role_terms) or any(role in title for role in requested)
+    technical_title = any(term in title for term in ("engineer", "developer", "scientist", "architect"))
+    job_skills = {skill.lower() for skill in extract_job_skills(details)}
+    requested_skills = {str(skill).lower() for skill in intent.get("skills") or []}
+    skill_match = len(job_skills & requested_skills)
+    return (role_match or skill_match >= 2) and technical_title
 
 
 def hard_filter(job: dict, intent: dict) -> bool:
@@ -107,6 +231,10 @@ def hard_filter(job: dict, intent: dict) -> bool:
         return False
     maximum = intent.get("experience_max_years")
     if maximum is not None and job.get("experience_min") is not None and job["experience_min"] > maximum:
+        return False
+    seniority = job.get("seniority") or parse_seniority(job.get("title", ""))
+    requested = " ".join(intent.get("roles") or []).lower()
+    if seniority in {"senior", "staff", "principal", "lead", "manager"} and seniority not in requested:
         return False
     locations = [x.lower() for x in intent.get("locations") or []]
     # Search-result snippets often omit the location. Exclude only a confirmed
@@ -183,12 +311,97 @@ def job_payload(job: Job) -> dict:
     return {"id": job.id, "company_id": job.company_id, "raw_title": job.raw_title, "title": job.title, "description": job.description, "location": job.location, "remote_type": job.remote_type, "employment_type": job.employment_type, "experience_min": job.experience_min, "experience_max": job.experience_max, "skills": job.skills or [], "job_url": job.job_url, "source_url": job.source_url, "source_type": job.source_type, "status": job.status, **(job.data or {})}
 
 
-async def execute_search(db: Session, user_id: str, query: str, search_type: str = "jobs", freshness: str | None = None) -> JobSearchSession:
+async def _expand_and_enrich(results: list[dict], intent: dict) -> list[dict]:
+    output = []
+    seen = set()
+    seen_jobs = set()
+    for result in results:
+        if "company" in result and "job" in result:
+            job_url = (result.get("job") or {}).get("job_url") or (result.get("job") or {}).get("source_url")
+            if job_url and job_url in seen:
+                continue
+            if job_url:
+                seen.add(job_url)
+            output.append(result)
+            continue
+        url = str(result.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        classification = classify_url(url)
+        if classification == "ats_page":
+            adapter = provider_for(url)
+            if not adapter:
+                continue
+            try:
+                company_name, website, domain = company_identity(url, result.get("title", ""))
+                for job in (await adapter.list_jobs(url))[:settings.max_search_results_per_query]:
+                    job_url = job.get("job_url") or job.get("source_url")
+                    if not job_url or job_url in seen or not relevant_job(job, intent):
+                        continue
+                    seen.add(job_url)
+                    identity = (domain, re.sub(r"[^a-z0-9]+", " ", job.get("title", "").lower()).strip())
+                    if identity in seen_jobs:
+                        continue
+                    seen_jobs.add(identity)
+                    output.append({"company": {"name": company_name, "website": website, "domain": domain, "careers_url": url, "description": result.get("snippet", ""), "source_urls": [url]}, "job": {**job, "skills": extract_job_skills(f"{job.get('title', '')} {job.get('description', '')}")}})
+            except Exception:
+                continue
+            continue
+        if classification != "job_page":
+            continue
+        details = {}
+        host = (urlparse(url).hostname or "").lower()
+        adapter = provider_for(url)
+        if adapter:
+            path_parts = [part for part in urlparse(url).path.split("/") if part]
+            job_id = path_parts[-1] if path_parts else ""
+            if adapter.name == "greenhouse" and "jobs" in path_parts:
+                job_id = path_parts[path_parts.index("jobs") + 1]
+            board_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}/{path_parts[0]}" if path_parts else url
+            try:
+                ats_job = await adapter.get_job(board_url, job_id)
+            except Exception:
+                ats_job = None
+            if ats_job:
+                if not relevant_job(ats_job, intent):
+                    continue
+                company_name, website, domain = company_identity(url, result.get("title", ""))
+                identity = (domain, re.sub(r"[^a-z0-9]+", " ", ats_job.get("title", "").lower()).strip())
+                if identity in seen_jobs:
+                    continue
+                seen_jobs.add(identity)
+                output.append({"company": {"name": company_name, "website": website, "domain": domain, "careers_url": board_url, "description": result.get("snippet", ""), "source_urls": [url]}, "job": {**ats_job, "skills": extract_job_skills(f"{ats_job.get('title', '')} {ats_job.get('description', '')}")}})
+                continue
+        if not any(domain in host for domain in ("linkedin.com", "wellfound.com", "indeed.com", "glassdoor.")):
+            try:
+                page = await WebsiteFetcher().fetch(url)
+                details = parse_job_posting_html(page["html"])
+            except Exception:
+                details = {}
+        raw_title = details.get("title") or result.get("title") or "Open position"
+        snippet = details.get("description") or result.get("content") or result.get("snippet") or ""
+        minimum, maximum = extract_experience(snippet)
+        company_name, website, domain = company_identity(url, result.get("title", ""))
+        if details.get("company_name"):
+            company_name = details["company_name"]
+        if not relevant_job({"title": raw_title, "description": snippet}, intent):
+            continue
+        identity = (domain, re.sub(r"[^a-z0-9]+", " ", raw_title.lower()).strip())
+        if identity in seen_jobs:
+            continue
+        seen_jobs.add(identity)
+        output.append({"company": {"name": company_name, "website": website, "domain": domain, "description": snippet[:1000], "source_urls": [url]}, "job": {"raw_title": raw_title, "title": raw_title, "description": snippet[:5000], "location": details.get("location"), "remote_type": "remote" if "remote" in f"{raw_title} {snippet}".lower() else None, "employment_type": details.get("employment_type"), "experience_min": minimum, "experience_max": maximum, "skills": extract_job_skills(f"{raw_title} {snippet}"), "seniority": parse_seniority(raw_title), "job_url": url, "source_url": url, "source_type": source_name(url), "status": "open", "posted_at": details.get("posted_date") or result.get("published_at")}})
+    return output
+
+
+async def execute_search(db: Session, user_id: str, query: str, search_type: str = "jobs", freshness: str | None = None, sources: list[str] | None = None, search_mode: str = "intent") -> JobSearchSession:
     profile = db.get(CandidateProfile, user_id)
     if not profile:
         raise LookupError("PROFILE_NOT_FOUND")
     normalized_query = " ".join(query.lower().split())
-    recent = next((row for row in db.query(JobSearchSession).filter(JobSearchSession.user_id == user_id, JobSearchSession.search_type == search_type, JobSearchSession.status == "completed", JobSearchSession.completed_at >= datetime.utcnow() - timedelta(seconds=settings.search_cache_ttl_seconds)).order_by(JobSearchSession.completed_at.desc()).limit(10).all() if " ".join(row.raw_query.lower().split()) == normalized_query), None)
+    requested_sources = list(dict.fromkeys(sources or ["official", "ats", "wellfound", "linkedin"]))
+    recent = next((row for row in db.query(JobSearchSession).filter(JobSearchSession.user_id == user_id, JobSearchSession.search_type == search_type, JobSearchSession.status == "completed", JobSearchSession.completed_at >= datetime.utcnow() - timedelta(seconds=settings.search_cache_ttl_seconds)).order_by(JobSearchSession.completed_at.desc()).limit(10).all() if " ".join(row.raw_query.lower().split()) == normalized_query and (row.structured_intent or {}).get("freshness") == freshness and (row.structured_intent or {}).get("sources", ["official", "ats", "wellfound", "linkedin"]) == requested_sources and (row.structured_intent or {}).get("search_mode", "intent") == search_mode), None)
     if recent and (search_type != "jobs" or db.query(Opportunity).filter(Opportunity.search_session_id == recent.id).count() > 0):
         return recent
     intent = None
@@ -199,7 +412,8 @@ async def execute_search(db: Session, user_id: str, query: str, search_type: str
         )
         # A real provider is preferred, but a temporary AI failure must not make
         # a user's job search unavailable; deterministic parsing remains useful.
-    intent = intent or parse_intent_locally(query, profile.data)
+    intent = complete_intent(intent or parse_intent_locally(query, profile.data), profile.data, sources, search_mode)
+    intent["raw_query"] = query if search_mode == "boolean" else ""
     queries = generate_queries(intent)
     if freshness:
         intent = {**intent, "freshness": freshness}
@@ -217,6 +431,7 @@ async def execute_search(db: Session, user_id: str, query: str, search_type: str
         if used and used not in providers_used: providers_used.append(used)
         session.progress = {**session.progress, "queries_completed": session.progress["queries_completed"] + 1, "providers_used": providers_used, "provider_attempts": provider_attempts, "failures": len([attempt for attempt in provider_attempts if attempt["status"] == "error"])}
         db.commit()
+    discovered = await _expand_and_enrich(discovered, intent) if search_type == "jobs" else discovered
     vector = EmbeddingService()
     companies, jobs = {}, {}
     for row in discovered:

@@ -3,9 +3,11 @@ from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Application, Artifact, CandidateProfile, GoogleConnection, InterviewTurn, Opportunity, Outreach, Resume, User
+from ..models import Application, Artifact, CandidateProfile, Company, GoogleConnection, InterviewTurn, Job, Opportunity, Outreach, Resume, User
 from ..auth import enforce_user, get_current_user
 from ..services.completeness_service import calculate
+from ..services.ats_providers import classify_url
+from ..services.job_discovery import company_payload, job_payload
 from .utils import MAX_INTERVIEW_QUESTIONS, normalize_profile, normalize_question, ok
 
 router = APIRouter(tags=["dashboard"])
@@ -53,6 +55,20 @@ def dashboard(user_id: str = "", db: Session = Depends(get_db), current_user: Us
     )
 
     identity = normalize_profile(profile.data)["identity"] if profile else {}
+    recent_opportunities = []
+    seen_jobs: set[tuple[str, str]] = set()
+    for opportunity in db.query(Opportunity).filter(Opportunity.user_id == user_id).order_by(Opportunity.created_at.desc()).all():
+        job = db.get(Job, opportunity.job_id); company = db.get(Company, opportunity.company_id)
+        if not job or not company or (classify_url(job.job_url) != "job_page" and not (job.source_type or "").startswith("mock")):
+            continue
+        dedupe_key = ((company.name or "").strip().lower(), " ".join((job.title or "").lower().split()))
+        if dedupe_key in seen_jobs:
+            continue
+        seen_jobs.add(dedupe_key)
+        recent_opportunities.append({"id": opportunity.id, "fit_score": opportunity.final_fit_score, "status": opportunity.status, "analysis": opportunity.analysis, "job": job_payload(job), "company": company_payload(company)})
+        if len(recent_opportunities) == 5:
+            break
+
     data = {
         "user": {"id": user_id, "name": identity.get("name", "")},
         "resume": {
@@ -77,7 +93,7 @@ def dashboard(user_id: str = "", db: Session = Depends(get_db), current_user: Us
             "available": bool(analysis_artifact),
             "analysis": analysis_artifact.data if analysis_artifact else None,
         },
-        "recent_opportunities": [{"id": row.id, "fit_score": row.final_fit_score, "status": row.status} for row in db.query(Opportunity).filter(Opportunity.user_id == user_id).order_by(Opportunity.created_at.desc()).limit(5).all()],
+        "recent_opportunities": recent_opportunities,
         "application_summary": {status: count for status, count in db.query(Application.status, func.count(Application.id)).filter(Application.user_id == user_id).group_by(Application.status).all()},
         "google_connection": {"connected": bool((connection := db.get(GoogleConnection, user_id)) and connection.status == "active"), "status": connection.status if connection else "disconnected"},
         "outreach_summary": {status: count for status, count in db.query(Outreach.status, func.count(Outreach.id)).filter(Outreach.user_id == user_id).group_by(Outreach.status).all()},
